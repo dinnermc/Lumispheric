@@ -1,0 +1,8 @@
+The stars.csv catalog is adapted from HYG Database v4.1 by Astronexus.
+Source: https://github.com/astronexus/HYG-Database
+The source data is licensed under Creative Commons Attribution-ShareAlike 4.0 International:
+https://creativecommons.org/licenses/by-sa/4.0/
+
+This copy contains stars with visual magnitude 6.0 or brighter and uses their
+right ascension, declination, apparent magnitude, and color index. The adapted
+catalog is distributed under the same license.
