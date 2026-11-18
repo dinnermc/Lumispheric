@@ -15,8 +15,8 @@
   <p>Procedural skies, atmospheric scattering, and blocky celestial beauty for the <b>Overworld</b>.</p>
 </div>
 
-> **Release status:** 1.0.0 is being prepared. The first GitHub release has not
-> been published yet.
+> **Lumispheric 1.0.0 is available** on the
+> [GitHub Releases page](https://github.com/dinnermc/Lumispheric/releases/latest).
 
 ## Features
 
@@ -75,6 +75,9 @@ Settings are client-side.
 - **Sodium:** supported.
 - **Iris:** Lumispheric disables its custom sky while a shaderpack is active and
   resumes when shaders are turned off.
+- Mods that also modify the sky, fog, clouds, or celestial rendering may
+  conflict and cause visual issues. Compatibility depends on the specific mods
+  and their versions.
 - **Other dimensions:** Lumispheric's custom sky is limited to the Overworld.
 
 ## License and third-party data
