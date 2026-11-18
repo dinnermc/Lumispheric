@@ -4,8 +4,8 @@
   <h1>Lumispheric</h1>
 
   <p>
-    <a href="https://github.com/dinnermc/Lumispheric/actions/workflows/build.yml">
-      <img src="https://github.com/dinnermc/Lumispheric/actions/workflows/build.yml/badge.svg" alt="Build" />
+    <a href="https://modrinth.com/project/lumispheric">
+      <img src="https://img.shields.io/modrinth/dt/lumispheric?logo=modrinth&label=Downloads&style=flat&color=242629&labelColor=5CA424&logoColor=fff" alt="Modrinth Downloads" />
     </a>
     <img src="https://img.shields.io/badge/Minecraft-1.21.1-brightgreen?logo=minecraft" alt="Minecraft Version" />
     <img src="https://img.shields.io/badge/Loader-NeoForge-orange" alt="NeoForge" />
