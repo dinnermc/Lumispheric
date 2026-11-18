@@ -1,10 +1,19 @@
-# Lumispheric
+<div align="center">
+  <img src="src/main/resources/logo.png" alt="Lumispheric Icon" width="180" />
 
-![Lumispheric logo](src/main/resources/logo.png)
+  <h1>Lumispheric</h1>
 
-Lumispheric is a client-focused sky and atmosphere mod for Minecraft 1.21.1 on
-NeoForge. It replaces the flat vanilla Overworld sky with a procedural sky
-designed to keep Minecraft's blocky visual style.
+  <p>
+    <a href="https://github.com/dinnermc/Lumispheric/actions/workflows/build.yml">
+      <img src="https://github.com/dinnermc/Lumispheric/actions/workflows/build.yml/badge.svg" alt="Build" />
+    </a>
+    <img src="https://img.shields.io/badge/Minecraft-1.21.1-brightgreen?logo=minecraft" alt="Minecraft Version" />
+    <img src="https://img.shields.io/badge/Loader-NeoForge-orange" alt="NeoForge" />
+    <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" />
+  </p>
+
+  <p>Procedural skies, atmospheric scattering, and blocky celestial beauty for the <b>Overworld</b>.</p>
+</div>
 
 > **Release status:** 1.0.0 is being prepared. The first GitHub release has not
 > been published yet.
