@@ -1,5 +1,7 @@
 # Lumispheric
 
+![Lumispheric logo](src/main/resources/logo.png)
+
 Lumispheric is a client-focused sky and atmosphere mod for Minecraft 1.21.1 on
 NeoForge. It replaces the flat vanilla Overworld sky with a procedural sky
 designed to keep Minecraft's blocky visual style.
