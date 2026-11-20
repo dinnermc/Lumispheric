@@ -25,7 +25,7 @@ public final class LumisphericConfigScreen extends Screen {
     @Override
     protected void init() {
         int centerX = this.width / 2;
-        int firstY = Math.max(36, this.height / 2 - 100);
+        int firstY = Math.max(28, this.height / 2 - 96);
         this.addRenderableWidget(Button.builder(enabledLabel(), button -> {
             Config.setEnabled(!Config.enabled);
             button.setMessage(enabledLabel());
@@ -60,6 +60,13 @@ public final class LumisphericConfigScreen extends Screen {
                 value -> String.format(Locale.ROOT, "%.0f°", value * 180.0 - 90.0),
                 value -> Config.setLatitude(value * 180.0 - 90.0)
             ));
+            this.addRenderableWidget(new ConfigSlider(
+                centerX - 140, firstY + 144, "config.lumispheric.celestial_size",
+                "config.lumispheric.tooltip.celestial_size",
+                (Config.celestialSize - 0.25F) / 0.75F,
+                value -> String.format(Locale.ROOT, "%.0f%%", 25.0 + value * 75.0),
+                value -> Config.setCelestialSize(0.25 + value * 0.75)
+            ));
         } else {
             this.addRenderableWidget(new ConfigSlider(
                 centerX - 140, firstY + 72, "config.lumispheric.star_brightness",
@@ -80,7 +87,7 @@ public final class LumisphericConfigScreen extends Screen {
         }
 
         this.addRenderableWidget(Button.builder(CommonComponents.GUI_DONE, button -> this.onClose())
-            .bounds(centerX - 100, firstY + 148, 200, 20).build());
+            .bounds(centerX - 100, firstY + 172, 200, 20).build());
     }
 
     @Override
@@ -120,9 +127,9 @@ public final class LumisphericConfigScreen extends Screen {
     }
 
     private enum Profile {
-        VANILLA_PLUS("config.lumispheric.profile.vanilla_plus", 0.70, 0.90, 0.65, 0.45, 0.65),
-        REALISTIC("config.lumispheric.profile.realistic", 0.85, 1.00, 1.00, 0.70, 1.00),
-        PERFORMANCE("config.lumispheric.profile.performance", 0.70, 0.80, 0.50, 0.45, 0.00);
+        VANILLA_PLUS("config.lumispheric.profile.vanilla_plus", 0.70, 0.90, 0.65, 0.45, 0.65, 0.65),
+        REALISTIC("config.lumispheric.profile.realistic", 0.85, 1.00, 1.00, 0.70, 1.00, 0.70),
+        PERFORMANCE("config.lumispheric.profile.performance", 0.70, 0.80, 0.50, 0.45, 0.00, 0.65);
 
         private final String translationKey;
         private final double sunset;
@@ -130,14 +137,19 @@ public final class LumisphericConfigScreen extends Screen {
         private final double milkyWay;
         private final double mie;
         private final double cloudDistance;
+        private final double celestialSize;
 
-        Profile(String translationKey, double sunset, double stars, double milkyWay, double mie, double cloudDistance) {
+        Profile(
+            String translationKey, double sunset, double stars, double milkyWay,
+            double mie, double cloudDistance, double celestialSize
+        ) {
             this.translationKey = translationKey;
             this.sunset = sunset;
             this.stars = stars;
             this.milkyWay = milkyWay;
             this.mie = mie;
             this.cloudDistance = cloudDistance;
+            this.celestialSize = celestialSize;
         }
 
         private void apply() {
@@ -146,6 +158,7 @@ public final class LumisphericConfigScreen extends Screen {
             Config.setMilkyWayBrightness(this.milkyWay);
             Config.setMieIntensity(this.mie);
             Config.setCloudDistance(this.cloudDistance);
+            Config.setCelestialSize(this.celestialSize);
         }
     }
 

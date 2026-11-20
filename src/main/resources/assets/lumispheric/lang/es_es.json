@@ -15,10 +15,12 @@
   "config.lumispheric.milky_way_brightness": "Brillo de la Vía Láctea: %s",
   "config.lumispheric.mie_intensity": "Halo atmosférico: %s",
   "config.lumispheric.latitude": "Latitud del cielo: %s",
+  "config.lumispheric.celestial_size": "Tamaño del Sol y la Luna: %s",
   "config.lumispheric.cloud_distance": "Distancia de las nubes: %s",
   "config.lumispheric.tooltip.sunset_intensity": "Ajusta el tono cálido alrededor del Sol al amanecer y al atardecer.",
   "config.lumispheric.tooltip.mie_intensity": "Controla el halo atmosférico suave alrededor del Sol.",
   "config.lumispheric.tooltip.latitude": "Ajusta la trayectoria aparente de los cuerpos celestes.",
+  "config.lumispheric.tooltip.celestial_size": "Cambia el tamaño del Sol y la Luna, del 25% al 100% del tamaño vanilla.",
   "config.lumispheric.tooltip.star_brightness": "Ajusta el brillo de las estrellas durante la noche.",
   "config.lumispheric.tooltip.milky_way_brightness": "Ajusta la intensidad de la banda de la Vía Láctea.",
   "config.lumispheric.tooltip.cloud_distance": "Amplía la distancia de renderizado de las nubes; valores menores reducen esa extensión."

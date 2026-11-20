@@ -22,6 +22,8 @@
     { "name": "FogEnd", "type": "float", "count": 1, "values": [ 1.0 ] },
     { "name": "CloudRain", "type": "float", "count": 1, "values": [ 0.0 ] },
     { "name": "CloudThunder", "type": "float", "count": 1, "values": [ 0.0 ] },
+    { "name": "CloudSunDirection", "type": "float", "count": 3, "values": [ 0.0, 1.0, 0.0 ] },
+    { "name": "CloudDeckOpacity", "type": "float", "count": 1, "values": [ 1.0 ] },
     { "name": "FogShape", "type": "int", "count": 1, "values": [ 0 ] }
   ]
 }

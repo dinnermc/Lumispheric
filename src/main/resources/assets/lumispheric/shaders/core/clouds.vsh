@@ -14,6 +14,7 @@ uniform int FogShape;
 out vec2 texCoord0;
 out float vertexDistance;
 out vec4 vertexColor;
+out vec3 cloudNormal;
 
 void main() {
     vec4 pos = ModelViewMat * vec4(Position, 1.0);
@@ -22,4 +23,5 @@ void main() {
     texCoord0 = UV0;
     vertexDistance = fog_distance(pos.xyz, FogShape);
     vertexColor = Color;
+    cloudNormal = Normal;
 }

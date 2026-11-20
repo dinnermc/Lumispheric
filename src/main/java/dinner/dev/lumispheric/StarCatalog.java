@@ -1,23 +1,58 @@
 package dinner.dev.lumispheric;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.MeshData;
 import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.JsonOps;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.server.packs.resources.SimplePreparableReloadListener;
+import net.minecraft.util.profiling.ProfilerFiller;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 
-final class StarCatalog {
+final class StarCatalog extends SimplePreparableReloadListener<List<StarCatalog.Star>> {
+    private static final Logger LOGGER = LoggerFactory.getLogger("Lumispheric");
     private static final double STAR_RADIUS = 100.0;
-    private static final List<Star> STARS = load();
+    private static final Codec<StarData> STAR_CODEC = RecordCodecBuilder.create(instance -> instance.group(
+        Codec.DOUBLE.fieldOf("ra_hours").forGetter(StarData::rightAscensionHours),
+        Codec.DOUBLE.fieldOf("dec_degrees").forGetter(StarData::declinationDegrees),
+        Codec.FLOAT.fieldOf("magnitude").forGetter(StarData::magnitude),
+        Codec.FLOAT.fieldOf("color_index").forGetter(StarData::colorIndex)
+    ).apply(instance, StarData::new));
+    private static final Codec<StarFile> FILE_CODEC = RecordCodecBuilder.create(instance -> instance.group(
+        Codec.BOOL.optionalFieldOf("replace", false).forGetter(StarFile::replace),
+        STAR_CODEC.listOf().fieldOf("stars").forGetter(StarFile::stars)
+    ).apply(instance, StarFile::new));
+    static final StarCatalog INSTANCE = new StarCatalog();
+    private static final List<Star> DEFAULT_STARS = load();
+    private static volatile List<Star> stars = DEFAULT_STARS;
+    private static volatile long revision;
 
     private StarCatalog() {}
+
+    static long revision() {
+        return revision;
+    }
 
     static MeshData buildMesh() {
         BufferBuilder builder = Tesselator.getInstance().begin(
@@ -25,21 +60,85 @@ final class StarCatalog {
             DefaultVertexFormat.POSITION_COLOR
         );
 
-        for (Star star : STARS) {
+        for (Star star : stars) {
             double cosDeclination = Math.cos(star.declination);
             double sinDeclination = Math.sin(star.declination);
-            float magnitude = clamp((6.0F - star.magnitude) / 7.5F, 0.0F, 1.0F);
-            float intensity = 0.08F + magnitude * 0.92F;
             double equatorialX = cosDeclination * Math.cos(star.rightAscension);
             double equatorialY = cosDeclination * Math.sin(star.rightAscension);
             double equatorialZ = sinDeclination;
+            float magnitude = clamp((6.0F - star.magnitude) / 7.5F, 0.0F, 1.0F);
+            float intensity = 0.20F + magnitude * 0.80F;
             addStar(
                 builder, equatorialX, equatorialY, equatorialZ,
-                0.04F + magnitude * 0.09F, star.colorIndex, intensity
+                0.06F + magnitude * 0.08F, star.colorIndex, intensity
             );
         }
 
         return builder.buildOrThrow();
+    }
+
+    @Override
+    protected List<Star> prepare(ResourceManager resourceManager, ProfilerFiller profiler) {
+        List<Star> loadedStars = new ArrayList<>(DEFAULT_STARS);
+        Map<ResourceLocation, Resource> resources =
+            resourceManager.listResources(
+                "stars",
+                location -> location.getNamespace().equals(Lumispheric.MODID)
+                    && location.getPath().endsWith(".json")
+            );
+
+        resources.entrySet().stream()
+            .sorted(Map.Entry.comparingByKey(Comparator.comparing(ResourceLocation::toString)))
+            .forEach(entry -> appendResource(entry.getKey(), entry.getValue(), loadedStars));
+        return List.copyOf(loadedStars);
+    }
+
+    @Override
+    protected void apply(List<Star> loadedStars, ResourceManager resourceManager, ProfilerFiller profiler) {
+        stars = List.copyOf(loadedStars);
+        revision++;
+    }
+
+    private static void appendResource(
+        ResourceLocation location,
+        Resource resource,
+        List<Star> loadedStars
+    ) {
+        StarFile starFile;
+        try (Reader reader = resource.openAsReader()) {
+            JsonElement json = JsonParser.parseReader(reader);
+            var result = FILE_CODEC.parse(JsonOps.INSTANCE, json);
+            if (result.error().isPresent()) {
+                LOGGER.warn("Invalid star catalog {}: {}", location, result.error().orElseThrow().message());
+                return;
+            }
+            starFile = result.result().orElseThrow();
+        } catch (IOException | JsonParseException | IllegalStateException exception) {
+            LOGGER.warn("Could not read star catalog {}; keeping the remaining catalogs.", location, exception);
+            return;
+        }
+        if (starFile == null) {
+            return;
+        }
+
+        List<Star> parsedStars = new ArrayList<>(starFile.stars().size());
+        try {
+            for (StarData star : starFile.stars()) {
+                parsedStars.add(star.toStar());
+            }
+        } catch (IllegalArgumentException exception) {
+            LOGGER.warn("Invalid star entry in catalog {}; keeping the remaining catalogs.", location, exception);
+            return;
+        }
+        if (parsedStars.isEmpty()) {
+            LOGGER.warn("Star catalog {} is empty; keeping the remaining catalogs.", location);
+            return;
+        }
+
+        if (starFile.replace()) {
+            loadedStars.clear();
+        }
+        loadedStars.addAll(parsedStars);
     }
 
     private static void addStar(
@@ -150,5 +249,26 @@ final class StarCatalog {
         return Math.max(min, Math.min(max, value));
     }
 
-    private record Star(double rightAscension, double declination, float magnitude, float colorIndex) {}
+    private record StarFile(boolean replace, List<StarData> stars) {}
+
+    private record StarData(
+        double rightAscensionHours, double declinationDegrees, float magnitude, float colorIndex
+    ) {
+        private Star toStar() {
+            if (!Double.isFinite(rightAscensionHours) || rightAscensionHours < 0.0
+                || rightAscensionHours >= 24.0 || !Double.isFinite(declinationDegrees)
+                || declinationDegrees < -90.0 || declinationDegrees > 90.0
+                || !Float.isFinite(magnitude) || !Float.isFinite(colorIndex)) {
+                throw new IllegalArgumentException("Coordinates and stellar values must be finite and in range");
+            }
+            return new Star(
+                rightAscensionHours * Math.PI / 12.0,
+                Math.toRadians(declinationDegrees),
+                magnitude,
+                colorIndex
+            );
+        }
+    }
+
+    record Star(double rightAscension, double declination, float magnitude, float colorIndex) {}
 }

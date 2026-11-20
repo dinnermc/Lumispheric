@@ -27,6 +27,9 @@ public final class Config {
     private static final ModConfigSpec.DoubleValue CLOUD_DISTANCE = BUILDER
         .comment("How far beyond vanilla the cloud mesh extends.")
         .defineInRange("cloudDistance", 1.0, 0.0, 1.0);
+    private static final ModConfigSpec.DoubleValue CELESTIAL_SIZE = BUILDER
+        .comment("Relative size of the Sun and Moon.")
+        .defineInRange("celestialSize", 0.65, 0.25, 1.0);
 
     static final ModConfigSpec SPEC = BUILDER.build();
 
@@ -37,6 +40,7 @@ public final class Config {
     public static float mieIntensity = 0.7F;
     public static double latitude = 40.0;
     public static float cloudDistance = 1.0F;
+    public static float celestialSize = 0.65F;
 
     private Config() {}
 
@@ -75,6 +79,11 @@ public final class Config {
         cloudDistance = (float) value;
     }
 
+    public static void setCelestialSize(double value) {
+        CELESTIAL_SIZE.set(value);
+        celestialSize = (float) value;
+    }
+
     public static void save() {
         SPEC.save();
     }
@@ -91,5 +100,6 @@ public final class Config {
         mieIntensity = MIE_INTENSITY.get().floatValue();
         latitude = LATITUDE.get();
         cloudDistance = CLOUD_DISTANCE.get().floatValue();
+        celestialSize = CELESTIAL_SIZE.get().floatValue();
     }
 }

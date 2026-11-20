@@ -1,7 +1,9 @@
 package dinner.dev.lumispheric.mixin;
 
+import dinner.dev.lumispheric.Config;
 import net.minecraft.core.BlockPos;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.LightChunkGetter;
 import net.minecraft.world.level.lighting.LightEngine;
 import org.spongepowered.asm.mixin.Final;
@@ -24,7 +26,9 @@ abstract class LightEngineMixin {
     private void lumispheric$readLightWithinPackedYRange(
         BlockPos pos, CallbackInfoReturnable<Integer> callback
     ) {
-        if (!(this.chunkSource.getLevel() instanceof ClientLevel)) {
+        if (!Config.enabled
+            || !(this.chunkSource.getLevel() instanceof ClientLevel level)
+            || level.dimension() != Level.OVERWORLD) {
             return;
         }
 

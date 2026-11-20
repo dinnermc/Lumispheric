@@ -1,6 +1,7 @@
 package dinner.dev.lumispheric;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.platform.GlStateManager;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.Tesselator;
@@ -8,7 +9,6 @@ import com.mojang.blaze3d.vertex.VertexBuffer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
-import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
@@ -20,8 +20,8 @@ import java.lang.reflect.Method;
 
 public final class SkyRenderer {
     private static final Logger LOGGER = LoggerFactory.getLogger("Lumispheric");
-    private static final int AZIMUTH_SEGMENTS = 64;
-    private static final int ELEVATION_SEGMENTS = 48;
+    private static final int AZIMUTH_SEGMENTS = 128;
+    private static final int ELEVATION_SEGMENTS = 96;
     private static final int AZIMUTH_STRIDE = AZIMUTH_SEGMENTS + 1;
     private static final int FOG_AZIMUTH_SAMPLES = 16;
     private static final int SKY_VERTEX_COUNT = (ELEVATION_SEGMENTS + 1) * AZIMUTH_STRIDE;
@@ -30,18 +30,44 @@ public final class SkyRenderer {
     // Level#getSeaLevel is deprecated and hardcodes 63; this renderer only handles the Overworld.
     private static final int OVERWORLD_SEA_LEVEL = 63;
     private static final double PLANET_RADIUS = 6_371_000.0;
+    private static final double CLOUD_WIND_RADIANS_PER_TICK = 0.000022;
+    private static final float PLANET_CURVATURE_START = 1_024.0F - OVERWORLD_SEA_LEVEL;
+    private static final float PLANET_CURVATURE_END = 8_000.0F - OVERWORLD_SEA_LEVEL;
+    private static final float PLANET_CURVATURE_MAX_DIP = 0.20F;
+    private static final float PLANET_HORIZON_TOP_FADE = 0.018F;
+    private static final float CELESTIAL_HORIZON_CLEARANCE = 0.035F;
+    private static final float PLANET_SURFACE_START = 1_024.0F - OVERWORLD_SEA_LEVEL;
+    private static final float PLANET_SURFACE_END = 4_096.0F - OVERWORLD_SEA_LEVEL;
+    private static final float CLOUD_DECK_FADE_START = 256.0F - OVERWORLD_SEA_LEVEL;
+    private static final float CLOUD_DECK_FADE_END = 768.0F - OVERWORLD_SEA_LEVEL;
+    private static final float HIGH_CLOUD_DECK_START = 768.0F - OVERWORLD_SEA_LEVEL;
+    private static final float HIGH_CLOUD_DECK_END = 1_024.0F - OVERWORLD_SEA_LEVEL;
+    private static final float HIGH_CLOUD_DECK_HEIGHT = 1_536.0F;
+    private static final float WEATHER_FADE_START = 896.0F;
+    private static final float WEATHER_FADE_END = 1024.0F;
+    private static final double PLANET_ROTATION_RADIANS_PER_BLOCK = 1.0 / PLANET_RADIUS;
+    private static final double MAX_PLANET_ROTATION_STEP = 512.0;
+    private static final float SPACE_TRANSITION_START = 2048.0F - OVERWORLD_SEA_LEVEL;
+    private static final float SPACE_TRANSITION_END = 8_000.0F - OVERWORLD_SEA_LEVEL;
     private static VertexBuffer skyBuffer;
     private static VertexBuffer starBuffer;
     private static int cachedSkyKey = Integer.MIN_VALUE;
+    private static long cachedSkyDayTimeBucket = Long.MIN_VALUE;
+    private static long cachedSkyAnimationBucket = Long.MIN_VALUE;
+    private static long cachedStarRevision = Long.MIN_VALUE;
     private static int cachedAltitude = Integer.MIN_VALUE;
     private static double cachedSkyLatitude = Double.NaN;
+    private static double previousPlanetCameraX = Double.NaN;
+    private static double previousPlanetCameraZ = Double.NaN;
+    private static double planetRotationAroundX;
+    private static double planetRotationAroundZ;
     private static Method irisShaderCheck;
     private static Object irisApi;
     private static boolean irisLookupFailed;
     private static long shaderCheckTime;
     private static boolean shadersActive;
+    private static ClientLevel renderedLevel;
     private static ClientLevel cachedFogLevel;
-    private static long cachedFogGameTime = Long.MIN_VALUE;
     private static long cachedFogDayTime = Long.MIN_VALUE;
     private static int cachedFogAltitude = Integer.MIN_VALUE;
     private static int cachedFogWeather = Integer.MIN_VALUE;
@@ -53,6 +79,45 @@ public final class SkyRenderer {
 
     private SkyRenderer() {}
 
+    private static void ensureLevel(ClientLevel level) {
+        if (renderedLevel == level) {
+            return;
+        }
+        closeBuffers();
+        renderedLevel = level;
+    }
+
+    public static void closeBuffers() {
+        if (skyBuffer != null) {
+            skyBuffer.close();
+            skyBuffer = null;
+        }
+        if (starBuffer != null) {
+            starBuffer.close();
+            starBuffer = null;
+        }
+        renderedLevel = null;
+        cachedSkyKey = Integer.MIN_VALUE;
+        cachedSkyDayTimeBucket = Long.MIN_VALUE;
+        cachedSkyAnimationBucket = Long.MIN_VALUE;
+        cachedAltitude = Integer.MIN_VALUE;
+        cachedSkyLatitude = Double.NaN;
+        previousPlanetCameraX = Double.NaN;
+        previousPlanetCameraZ = Double.NaN;
+        planetRotationAroundX = 0.0;
+        planetRotationAroundZ = 0.0;
+        cachedStarRevision = Long.MIN_VALUE;
+        cachedFogLevel = null;
+        cachedFogDayTime = Long.MIN_VALUE;
+        cachedFogAltitude = Integer.MIN_VALUE;
+        cachedFogWeather = Integer.MIN_VALUE;
+        cachedFogLatitude = Double.NaN;
+        cachedFogSunsetIntensity = Float.NaN;
+        cachedFogMieIntensity = Float.NaN;
+        cachedFogMilkyWayBrightness = Float.NaN;
+        cachedFogColor = null;
+    }
+
     public static boolean shouldRender(ClientLevel level) {
         return Config.enabled && level != null
             && level.dimension() == net.minecraft.world.level.Level.OVERWORLD
@@ -61,44 +126,78 @@ public final class SkyRenderer {
     }
 
     public static void render(Matrix4f pose, Matrix4f projection, float partialTick, ClientLevel level) {
-        float rain = Math.max(level.getRainLevel(partialTick), level.getThunderLevel(partialTick));
-        double cameraY = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition().y;
+        ensureLevel(level);
+        Vec3 cameraPosition = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition();
+        double cameraY = cameraPosition.y;
+        float rain = weatherStrength(level, cameraY, partialTick);
         int altitude = Math.max(0, (int) Math.floor(cameraY - OVERWORLD_SEA_LEVEL));
+        updatePlanetRotation(cameraPosition.x, cameraPosition.z);
         float horizonDip = horizonDip(altitude);
-        int key = Long.hashCode(level.getGameTime() * 31L + level.getDayTime())
-            ^ (Math.round(rain * 100.0F) << 8)
+        long dayTimeBucket = level.getDayTime() / 10L;
+        long animationBucket = level.getGameTime() / 10L;
+        int key = (Math.round(rain * 100.0F) << 8)
             ^ (Math.round(Config.sunsetIntensity * 100.0F) << 16)
-            ^ (Math.round(Config.mieIntensity * 100.0F) << 24);
+            ^ (Math.round(Config.mieIntensity * 100.0F) << 24)
+            ^ Float.floatToIntBits(Config.milkyWayBrightness);
 
         if (skyBuffer == null || key != cachedSkyKey || altitude != cachedAltitude
+            || dayTimeBucket != cachedSkyDayTimeBucket || animationBucket != cachedSkyAnimationBucket
             || Double.compare(Config.latitude, cachedSkyLatitude) != 0) {
-            rebuild(level, partialTick, rain, horizonDip, key, altitude);
+            rebuild(level, partialTick, rain, horizonDip, key, altitude, dayTimeBucket, animationBucket);
         }
 
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
         RenderSystem.disableCull();
         RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
-        skyBuffer.drawWithShader(pose, projection, GameRenderer.getPositionColorShader());
+        float planetBlend = planetSurfaceBlend(altitude);
+        double astronomicalTime = level.getDayTime() + partialTick;
+        double latitude = CelestialModel.latitudeRadians();
+        CelestialModel.Direction sun = CelestialModel.sunDirection(astronomicalTime, latitude);
+        CelestialModel.Direction moon = CelestialModel.moonDirection(astronomicalTime, latitude);
+        double cloudWindAngle = Math.IEEEremainder(
+            (level.getGameTime() + (double) partialTick) * CLOUD_WIND_RADIANS_PER_TICK,
+            Math.PI * 2.0
+        );
+        ShaderInstance planetShader = LumisphericClient.getPlanetShader(
+            sun,
+            moon,
+            (float) sun.up(),
+            CelestialModel.moonIllumination(astronomicalTime),
+            (float) cloudWindAngle,
+            (float) apparentPlanetRadius(altitude),
+            altitude,
+            geometricHorizonDip(altitude),
+            planetBlend,
+            (float) planetRotationAroundZ,
+            (float) planetRotationAroundX
+        );
+        skyBuffer.drawWithShader(pose, projection, planetShader);
         VertexBuffer.unbind();
         float milkyWayStrength = milkyWayStrength(level, partialTick);
         if (milkyWayStrength > 0.001F) {
-            double astronomicalTime = level.getDayTime() + partialTick;
-            double latitude = CelestialModel.latitudeRadians();
             ShaderInstance milkyWayShader = LumisphericClient.getMilkyWayShader(
                 CelestialModel.galacticNorthDirection(astronomicalTime, latitude),
                 CelestialModel.galacticCenterDirection(astronomicalTime, latitude),
                 milkyWayStrength
             );
+            RenderSystem.blendFuncSeparate(
+                GlStateManager.SourceFactor.SRC_ALPHA,
+                GlStateManager.DestFactor.ONE,
+                GlStateManager.SourceFactor.ONE,
+                GlStateManager.DestFactor.ZERO
+            );
             skyBuffer.drawWithShader(pose, projection, milkyWayShader);
             VertexBuffer.unbind();
+            RenderSystem.defaultBlendFunc();
         }
         RenderSystem.enableCull();
         RenderSystem.disableBlend();
     }
 
     private static void rebuild(
-        ClientLevel level, float partialTick, float rain, float horizonDip, int key, int altitude
+        ClientLevel level, float partialTick, float rain, float horizonDip, int key, int altitude,
+        long dayTimeBucket, long animationBucket
     ) {
         if (skyBuffer == null) {
             skyBuffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
@@ -112,7 +211,14 @@ public final class SkyRenderer {
         float sunX = (float) sun.east();
         float sunY = (float) sun.up();
         float sunZ = (float) sun.south();
-        float warmAmount = twilightAmount(sunY) * Config.sunsetIntensity;
+        CelestialModel.Direction galacticNorth = CelestialModel.galacticNorthDirection(
+            astronomicalTime, latitude
+        );
+        CelestialModel.Direction galacticCenter = CelestialModel.galacticCenterDirection(
+            astronomicalTime, latitude
+        );
+        float galaxyStrength = milkyWayStrength(level, partialTick);
+        Twilight twilight = twilightPalette(sunY, altitude);
         float moonIllumination = CelestialModel.moonIllumination(astronomicalTime);
         float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude)
             * (1.0F - rain);
@@ -130,9 +236,12 @@ public final class SkyRenderer {
                 SKY_POSITIONS[positionIndex] = (float) Math.cos(azimuthAngle) * horizontal * 128.0F;
                 SKY_POSITIONS[positionIndex + 1] = y;
                 SKY_POSITIONS[positionIndex + 2] = (float) Math.sin(azimuthAngle) * horizontal * 128.0F;
-                SKY_COLORS[index] = atmosphereColor(
-                    angle, azimuthAngle, night, rain, warmAmount, sunX, sunY, sunZ, horizonDip,
+                int skyColor = atmosphereColor(
+                    angle, azimuthAngle, night, rain, twilight, sunX, sunY, sunZ, horizonDip,
                     moonIllumination, eclipse, aurora, meteor, gameTime, altitude
+                );
+                SKY_COLORS[index] = applyMilkyWay(
+                    skyColor, angle, azimuthAngle, galacticNorth, galacticCenter, galaxyStrength
                 );
             }
         }
@@ -154,6 +263,8 @@ public final class SkyRenderer {
 
         skyBuffer.upload(builder.buildOrThrow());
         cachedSkyKey = key;
+        cachedSkyDayTimeBucket = dayTimeBucket;
+        cachedSkyAnimationBucket = animationBucket;
         cachedAltitude = altitude;
         cachedSkyLatitude = Config.latitude;
     }
@@ -176,7 +287,7 @@ public final class SkyRenderer {
     public static Vec3 horizonColor(ClientLevel level, float partialTick, float azimuth, double cameraY) {
         double astronomicalTime = level.getDayTime() + partialTick;
         float night = level.getStarBrightness(partialTick);
-        float rain = Math.max(level.getRainLevel(partialTick), level.getThunderLevel(partialTick));
+        float rain = weatherStrength(level, cameraY, partialTick);
         double latitude = CelestialModel.latitudeRadians();
         CelestialModel.Direction sun = CelestialModel.sunDirection(astronomicalTime, latitude);
         float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude)
@@ -184,12 +295,13 @@ public final class SkyRenderer {
         float sunX = (float) sun.east();
         float sunY = (float) sun.up();
         float sunZ = (float) sun.south();
-        float warm = twilightAmount(sunY) * Config.sunsetIntensity;
+        float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        Twilight twilight = twilightPalette(sunY, altitude);
         float horizonDip = horizonDip(Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL));
         int color = atmosphereColor(
-            -horizonDip, azimuth, night, rain, warm, sunX, sunY, sunZ, horizonDip,
+            -horizonDip, azimuth, night, rain, twilight, sunX, sunY, sunZ, horizonDip,
             CelestialModel.moonIllumination(astronomicalTime), eclipse, 0.0F, null, level.getGameTime(),
-            (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL)
+            altitude
         );
         color = applyMilkyWay(
             color,
@@ -204,15 +316,13 @@ public final class SkyRenderer {
 
     public static Vec3 horizonFogColor(ClientLevel level, double cameraY) {
         float fogPartialTick = 0.5F;
-        long gameTime = level.getGameTime();
-        long dayTime = level.getDayTime();
+        long dayTime = level.getDayTime() / 10L;
         int altitude = (int) Math.floor(cameraY - OVERWORLD_SEA_LEVEL);
         int weather = Float.floatToIntBits(
             Math.max(level.getRainLevel(fogPartialTick), level.getThunderLevel(fogPartialTick))
         );
         if (cachedFogColor != null
             && cachedFogLevel == level
-            && cachedFogGameTime == gameTime
             && cachedFogDayTime == dayTime
             && cachedFogAltitude == altitude
             && cachedFogWeather == weather
@@ -236,7 +346,6 @@ public final class SkyRenderer {
         double normalization = 1.0 / FOG_AZIMUTH_SAMPLES;
         cachedFogColor = new Vec3(red * normalization, green * normalization, blue * normalization);
         cachedFogLevel = level;
-        cachedFogGameTime = gameTime;
         cachedFogDayTime = dayTime;
         cachedFogAltitude = altitude;
         cachedFogWeather = weather;
@@ -248,78 +357,133 @@ public final class SkyRenderer {
     }
 
     private static int atmosphereColor(
-        float elevation, float azimuth, float night, float rain, float warmAmount, float sunX, float sunY,
+        float elevation, float azimuth, float night, float rain, Twilight twilight, float sunX, float sunY,
         float sunZ, float horizonDip, float moonIllumination, float eclipse, float aurora, Meteor meteor, long gameTime,
         float altitude
     ) {
-        float skyElevation = Math.max(0.0F, elevation + horizonDip);
+        float spaceBlend = spaceTransitionStrength(altitude);
+        float horizonDrop = spaceBlend * 0.10F;
+        float skyElevation = elevation + horizonDip + horizonDrop;
         float altitudeBlend = smoothstep(0.0F, 256.0F, altitude);
-        float horizonSharpness = mix(2.8F, 3.8F, altitudeBlend);
-        float horizon = (float) Math.exp(-skyElevation * horizonSharpness);
-        float red = mix(0.15F, 0.60F, horizon);
-        float green = mix(0.28F, 0.74F, horizon);
-        float blue = mix(0.64F, 0.89F, horizon);
-
-        float nightBlend = Math.max(Math.min(night * 2.0F, 1.0F), 1.0F - smoothstep(-0.28F, 0.03F, sunY));
-        red = mix(red, mix(0.006F, 0.018F, horizon), nightBlend);
-        green = mix(green, mix(0.009F, 0.026F, horizon), nightBlend);
-        blue = mix(blue, mix(0.018F, 0.040F, horizon), nightBlend);
-
-        float upperAtmosphere = altitudeBlend * smoothstep(0.08F, 0.72F, skyElevation);
-        red = mix(red, mix(0.065F, 0.006F, nightBlend), upperAtmosphere * 0.82F);
-        green = mix(green, mix(0.16F, 0.008F, nightBlend), upperAtmosphere * 0.82F);
-        blue = mix(blue, mix(0.42F, 0.020F, nightBlend), upperAtmosphere * 0.82F);
-
-        float lunarGlow = moonIllumination * nightBlend * (1.0F - rain) * 0.012F;
-        red += lunarGlow * 0.35F;
-        green += lunarGlow * 0.65F;
-        blue += lunarGlow;
+        float geometricDip = horizonDip - altitudeBlend * 0.025F;
+        float horizonSharpness = mix(2.8F, 12.0F, spaceBlend);
+        float horizon = (float) Math.exp(-Math.abs(skyElevation) * horizonSharpness);
+        float horizonRed = mix(0.60F, 0.14F, spaceBlend);
+        float horizonGreen = mix(0.74F, 0.30F, spaceBlend);
+        float horizonBlue = mix(0.89F, 0.62F, spaceBlend);
+        float red = mix(0.15F, horizonRed, horizon);
+        float green = mix(0.28F, horizonGreen, horizon);
+        float blue = mix(0.64F, horizonBlue, horizon);
 
         float horizontal = (float) Math.cos(elevation);
         float viewX = (float) Math.cos(azimuth) * horizontal;
         float viewY = (float) Math.sin(elevation);
         float viewZ = (float) Math.sin(azimuth) * horizontal;
         float sunDot = Math.max(-1.0F, Math.min(1.0F, viewX * sunX + viewY * sunY + viewZ * sunZ));
+        float sunElevation = (float) Math.asin(Math.max(-1.0F, Math.min(1.0F, sunY)));
+        float apparentSunElevation = sunElevation + geometricDip;
+        float vanillaNight = Math.max(
+            Math.min(night * 2.0F, 1.0F),
+            1.0F - smoothstep(-0.28F, 0.03F, sunY)
+        );
+        float highAltitudeNight = 1.0F - smoothstep(-0.32F, 0.02F, apparentSunElevation);
+        float nightBlend = mix(vanillaNight, highAltitudeNight, altitudeBlend);
+        float horizonNight = mix(
+            nightBlend,
+            1.0F - smoothstep(-0.16F, 0.22F, sunDot),
+            spaceBlend
+        );
+        red = mix(red, mix(0.006F, 0.018F, horizon), horizonNight);
+        green = mix(green, mix(0.009F, 0.026F, horizon), horizonNight);
+        blue = mix(blue, mix(0.018F, 0.040F, horizon), horizonNight);
+
+        float atmosphereHeight = Math.max(0.0F, skyElevation) / 0.045F;
+        float upperAtmosphere = spaceBlend * (float) Math.exp(-atmosphereHeight * atmosphereHeight);
+        red = mix(red, mix(0.065F, 0.006F, horizonNight), upperAtmosphere * 0.82F);
+        green = mix(green, mix(0.16F, 0.008F, horizonNight), upperAtmosphere * 0.82F);
+        blue = mix(blue, mix(0.42F, 0.020F, horizonNight), upperAtmosphere * 0.82F);
+
+        float lunarGlow = moonIllumination * horizonNight * (1.0F - rain) * 0.012F;
+        red += lunarGlow * 0.35F;
+        green += lunarGlow * 0.65F;
+        blue += lunarGlow;
+
         float sunAngle = (float) Math.acos(sunDot);
         float rayleighPhase = 0.75F * (1.0F + sunDot * sunDot);
-        float rayleighScatter = (1.0F - nightBlend) * (1.0F - rain)
+        float rayleighScatter = (1.0F - horizonNight) * (1.0F - rain)
             * rayleighPhase * (0.35F + 0.65F * horizon);
         red += rayleighScatter * 0.012F;
         green += rayleighScatter * 0.035F;
         blue += rayleighScatter * 0.085F;
 
-        float solarOpticalDepth = solarAirMass(sunY) - 1.0F;
-        float solarGreen = (float) Math.exp(-0.12F * solarOpticalDepth);
-        float solarBlue = (float) Math.exp(-0.34F * solarOpticalDepth);
-        float warmRed = 0.98F;
-        float warmGreen = 0.62F * (0.42F + 0.58F * solarGreen);
-        float warmBlue = 0.44F * (0.14F + 0.86F * solarBlue);
-        float wideGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.55F) * warmAmount;
-        float coreGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.12F) * warmAmount;
-        float twilight = 1.0F - rain * 0.75F;
+        float limbCenter = elevation + geometricDip - 0.03F;
+        float blueLimbWidth = 0.035F + spaceBlend * 0.012F;
+        float blueLimbDistance = limbCenter / blueLimbWidth;
+        float blueLimbBand = (float) Math.exp(-blueLimbDistance * blueLimbDistance)
+            * spaceBlend * (1.0F - horizonNight * 0.65F) * (1.0F - rain * 0.5F);
+        float sunwardAlignment = smoothstep(-0.16F, 0.28F, sunDot);
+        float blueLimb = blueLimbBand * sunwardAlignment;
+        red += blueLimb * 0.025F;
+        green += blueLimb * 0.095F;
+        blue += blueLimb * 0.22F;
 
-        float horizonTwilight = warmAmount * horizon * (0.18F + 0.26F * Math.max(0.0F, sunDot)) * twilight;
-        red = mix(red, 0.76F, horizonTwilight);
-        green = mix(green, 0.34F + solarGreen * 0.12F, horizonTwilight);
-        blue = mix(blue, 0.24F + solarBlue * 0.12F, horizonTwilight);
+        float warmLimbWidth = 0.045F + spaceBlend * 0.02F;
+        float warmLimbDistance = (elevation + geometricDip - 0.006F) / warmLimbWidth;
+        float warmLimb = (float) Math.exp(-warmLimbDistance * warmLimbDistance)
+            * spaceBlend * twilight.strength * smoothstep(0.55F, 0.95F, sunDot)
+            * (1.0F - rain * 0.5F) * 0.7F;
+        red += warmLimb * 0.12F;
+        green += warmLimb * 0.045F;
+        blue += warmLimb * 0.018F;
 
-        float outer = wideGlow * twilight * 0.48F;
-        float core = coreGlow * twilight * 0.40F;
-        red = mix(red, 0.88F, outer);
-        green = mix(green, warmGreen + 0.08F, outer);
-        blue = mix(blue, warmBlue + 0.08F, outer);
-        red = mix(red, warmRed, core);
-        green = mix(green, warmGreen + 0.12F, core);
-        blue = mix(blue, warmBlue + 0.13F, core);
+        float twilightLight = twilight.strength * (1.0F - rain * 0.75F);
+        float wideGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.36F) * twilightLight;
+        float coreGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.085F) * twilightLight;
+        float sunwardHorizon = (float) Math.exp(-(sunAngle * sunAngle) / 0.72F);
+        float horizonTwilight = horizon * twilightLight * (0.58F + 0.42F * sunwardHorizon) * 0.72F;
+        float warmPalette = 0.25F + 0.55F * sunwardHorizon;
+        float peachToRose = 1.0F - twilight.blueHour;
+        float broadRed = mix(0.68F, 0.84F, peachToRose);
+        float broadGreen = mix(0.55F, 0.66F, peachToRose);
+        float broadBlue = mix(0.72F, 0.56F, peachToRose);
+        red = mix(red, mix(broadRed, twilight.red, warmPalette), horizonTwilight);
+        green = mix(green, mix(broadGreen, twilight.green, warmPalette), horizonTwilight);
+        blue = mix(blue, mix(broadBlue, twilight.blue, warmPalette), horizonTwilight);
+
+        float roseHeight = (skyElevation - 0.10F) / 0.22F;
+        float roseBand = (float) Math.exp(-roseHeight * roseHeight) * horizon * twilightLight
+            * (0.65F + 0.35F * (1.0F - sunwardHorizon)) * 0.36F;
+        float roseRed = mix(0.74F, 0.56F, twilight.blueHour);
+        float roseGreen = mix(0.48F, 0.43F, twilight.blueHour);
+        float roseBlue = mix(0.56F, 0.72F, twilight.blueHour);
+        red = mix(red, roseRed, roseBand);
+        green = mix(green, roseGreen, roseBand);
+        blue = mix(blue, roseBlue, roseBand);
+
+        float antisolarDistance = (float) Math.PI - sunAngle;
+        float antisolarGlow = (float) Math.exp(-(antisolarDistance * antisolarDistance) / 0.62F)
+            * horizon * twilightLight * twilight.blueHour * 0.24F;
+        red = mix(red, 0.44F, antisolarGlow);
+        green = mix(green, 0.27F, antisolarGlow);
+        blue = mix(blue, 0.54F, antisolarGlow);
+
+        float outer = wideGlow * 0.34F;
+        float core = coreGlow * 0.32F;
+        red = mix(red, mix(0.88F, twilight.red, 0.65F), outer);
+        green = mix(green, twilight.green + 0.08F, outer);
+        blue = mix(blue, twilight.blue + 0.08F, outer);
+        red = mix(red, twilight.red, core);
+        green = mix(green, twilight.green + 0.12F, core);
+        blue = mix(blue, twilight.blue + 0.13F, core);
 
         float mieAsymmetry = 0.78F;
         float mieDenominator = 1.0F + mieAsymmetry * mieAsymmetry - 2.0F * mieAsymmetry * sunDot;
         float mieRatio = (1.0F - mieAsymmetry) * (1.0F - mieAsymmetry) / mieDenominator;
         float miePhase = mieRatio * (float) Math.sqrt(mieRatio);
-        float mieStrength = miePhase * Config.mieIntensity * (1.0F - nightBlend)
-            * (1.0F - rain * 0.75F) * 0.16F * (0.35F + 0.65F * warmAmount);
-        float mieGreen = mix(0.92F, warmGreen + 0.20F, warmAmount);
-        float mieBlue = mix(0.82F, warmBlue + 0.20F, warmAmount);
+        float mieStrength = miePhase * Config.mieIntensity * (1.0F - horizonNight)
+            * (1.0F - rain * 0.75F) * 0.16F * (0.35F + 0.65F * twilight.strength);
+        float mieGreen = mix(0.92F, twilight.green + 0.20F, twilight.strength);
+        float mieBlue = mix(0.82F, twilight.blue + 0.20F, twilight.strength);
         red = mix(red, 0.99F, mieStrength);
         green = mix(green, mieGreen, mieStrength);
         blue = mix(blue, mieBlue, mieStrength);
@@ -349,11 +513,98 @@ public final class SkyRenderer {
         red = mix(red, 0.92F, corona);
         green = mix(green, 0.78F, corona);
         blue = mix(blue, 0.52F, corona);
+
+        float spaceRed = mix(0.002F, 0.001F, horizonNight);
+        float spaceGreen = mix(0.004F, 0.002F, horizonNight);
+        float spaceBlue = mix(0.012F, 0.006F, horizonNight);
+        float apparentElevation = elevation + horizonDip + horizonDrop * 0.5F;
+        float spaceFacing = smoothstep(0.02F, 0.14F, Math.abs(apparentElevation));
+        float spaceDarkening = spaceBlend * spaceFacing;
+        red = mix(red, spaceRed, spaceDarkening);
+        green = mix(green, spaceGreen, spaceDarkening);
+        blue = mix(blue, spaceBlue, spaceDarkening);
+
         return (toByte(red) << 16) | (toByte(green) << 8) | toByte(blue);
     }
 
+    private static float spaceTransitionStrength(float altitude) {
+        return smoothstep(SPACE_TRANSITION_START, SPACE_TRANSITION_END, altitude);
+    }
+
+    public static float weatherFade(double cameraY) {
+        return 1.0F - smoothstep(WEATHER_FADE_START, WEATHER_FADE_END, (float) cameraY);
+    }
+
+    public static float spaceTransition(double cameraY) {
+        float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        return spaceTransitionStrength(altitude);
+    }
+
+    public static float surfaceDaylightStrength(
+        float sunUp, float vanillaStarBrightness, double cameraY
+    ) {
+        float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        float astronomicalDaylight = smoothstep(-0.08F, 0.16F, sunUp);
+        float vanillaDaylight = 1.0F - Math.max(0.0F, Math.min(1.0F, vanillaStarBrightness));
+        float daylight = Math.max(astronomicalDaylight, vanillaDaylight);
+        return daylight * (1.0F - planetSurfaceBlend(altitude));
+    }
+
+    public static float cloudDeckHeight(float vanillaHeight, double cameraY) {
+        if (Float.isNaN(vanillaHeight)) {
+            return vanillaHeight;
+        }
+        float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        return altitude >= HIGH_CLOUD_DECK_START ? HIGH_CLOUD_DECK_HEIGHT : vanillaHeight;
+    }
+
+    public static float cloudDeckOpacity(double cameraY) {
+        float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        float lowDeckOpacity = 1.0F - smoothstep(
+            CLOUD_DECK_FADE_START, CLOUD_DECK_FADE_END, altitude
+        );
+        float highDeckOpacity = smoothstep(
+            HIGH_CLOUD_DECK_START, HIGH_CLOUD_DECK_END, altitude
+        ) * (1.0F - planetSurfaceBlend(altitude));
+        return Math.max(lowDeckOpacity, highDeckOpacity);
+    }
+
+    private static float planetSurfaceBlend(float altitude) {
+        return smoothstep(PLANET_SURFACE_START, PLANET_SURFACE_END, altitude);
+    }
+
+    public static float weatherStrength(ClientLevel level, double cameraY, float partialTick) {
+        if (level == null || cameraY >= WEATHER_FADE_END) {
+            return 0.0F;
+        }
+        float weather = Math.max(level.getRainLevel(partialTick), level.getThunderLevel(partialTick));
+        return weather * weatherFade(cameraY);
+    }
+
+    public static float celestialHorizonLevel(double cameraY) {
+        double altitude = Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        float planetBlend = planetSurfaceBlend((float) altitude);
+        float horizonClearance = PLANET_HORIZON_TOP_FADE + CELESTIAL_HORIZON_CLEARANCE * planetBlend;
+        return (float) Math.sin(-geometricHorizonDip(altitude) + horizonClearance);
+    }
+
+    public static float celestialHorizonFadeTop(double cameraY) {
+        float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        float fadeDegrees = mix(
+            0.6F,
+            3.0F,
+            smoothstep(PLANET_SURFACE_START, PLANET_SURFACE_END, altitude)
+        );
+        return celestialHorizonLevel(cameraY) + (float) Math.sin(Math.toRadians(fadeDegrees));
+    }
+
+    public static float celestialHorizonOpacity(float localUp, double cameraY) {
+        return smoothstep(celestialHorizonLevel(cameraY), celestialHorizonFadeTop(cameraY), localUp);
+    }
+
     private static float milkyWayStrength(ClientLevel level, float partialTick) {
-        float rain = Math.max(level.getRainLevel(partialTick), level.getThunderLevel(partialTick));
+        double cameraY = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition().y;
+        float rain = weatherStrength(level, cameraY, partialTick);
         float night = level.getStarBrightness(partialTick);
         double astronomicalTime = level.getDayTime() + partialTick;
         CelestialModel.Direction sun = CelestialModel.sunDirection(
@@ -368,8 +619,12 @@ public final class SkyRenderer {
             0.0,
             Minecraft.getInstance().gameRenderer.getMainCamera().getPosition().y - OVERWORLD_SEA_LEVEL
         );
+        float spaceBlend = spaceTransitionStrength((float) altitude);
+        float highAltitudeVisibility = smoothstep(1_024.0F, 4_096.0F, (float) altitude);
+        float milkyWayVisibility = Math.max(nightBlend, highAltitudeVisibility);
         float airDensity = (float) Math.exp(-altitude / 8_500.0);
-        return nightBlend * (1.0F - rain) * (1.0F - moonIllumination * 0.55F)
+        float moonlightFade = 1.0F - moonIllumination * 0.55F * (1.0F - spaceBlend);
+        return milkyWayVisibility * (1.0F - rain) * moonlightFade
             * (1.0F - airDensity * 0.15F) * Config.milkyWayBrightness;
     }
 
@@ -389,13 +644,13 @@ public final class SkyRenderer {
             + viewY * (float) galacticNorth.up()
             + viewZ * (float) galacticNorth.south();
         float galacticLatitude = (float) Math.asin(Math.max(-1.0F, Math.min(1.0F, planeDot)));
-        float bandDistance = galacticLatitude / 0.15F;
+        float bandDistance = galacticLatitude / 0.30F;
         float band = (float) Math.exp(-bandDistance * bandDistance);
         float centerDot = viewX * (float) galacticCenter.east()
             + viewY * (float) galacticCenter.up()
             + viewZ * (float) galacticCenter.south();
         float core = 0.55F + 0.45F * Math.max(0.0F, centerDot);
-        float alpha = band * core * strength * 0.16F;
+        float alpha = Math.min(band * core * 0.10F * strength, 0.14F);
         if (alpha <= 0.0F) {
             return color;
         }
@@ -414,23 +669,70 @@ public final class SkyRenderer {
     }
 
     public static void renderStars(Matrix4f pose, Matrix4f projection, ClientLevel level, float partialTick) {
+        ensureLevel(level);
         double latitude = CelestialModel.latitudeRadians();
         if (starBuffer == null) {
             starBuffer = new VertexBuffer(VertexBuffer.Usage.STATIC);
+        }
+        long catalogRevision = StarCatalog.revision();
+        if (catalogRevision != cachedStarRevision) {
             starBuffer.upload(StarCatalog.buildMesh());
+            cachedStarRevision = catalogRevision;
         }
 
         Matrix4f celestialToLocal = CelestialModel.celestialToLocalMatrix(
-            level.getDayTime() + partialTick,
-            latitude
+            level.getDayTime() + partialTick, latitude
         );
-        float observerAltitude = (float) Math.max(
-            0.0,
-            Minecraft.getInstance().gameRenderer.getMainCamera().getPosition().y - OVERWORLD_SEA_LEVEL
+        float nightBrightness = level.getStarBrightness(partialTick);
+        double cameraY = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition().y;
+        float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
+        float spaceBlend = spaceTransitionStrength(altitude);
+        float spaceStarBlend = smoothstep(
+            2_048.0F - OVERWORLD_SEA_LEVEL,
+            4_096.0F - OVERWORLD_SEA_LEVEL,
+            altitude
         );
-        ShaderInstance shader = LumisphericClient.getStarShader(celestialToLocal, observerAltitude);
-        starBuffer.drawWithShader(pose, projection, shader);
-        VertexBuffer.unbind();
+        float spaceBrightness = spaceStarBlend * 0.75F;
+        float sunY = (float) CelestialModel.sunDirection(
+            level.getDayTime() + partialTick, latitude
+        ).up();
+        float twilightStars = (1.0F - smoothstep(-0.12F, 0.08F, sunY))
+            * mix(0.20F, 0.30F, spaceBlend);
+        float brightness = Math.max(nightBrightness, Math.max(spaceBrightness, twilightStars))
+            * Config.starBrightness
+            * starVisibility(level);
+        if (brightness <= 0.001F) {
+            return;
+        }
+
+        RenderSystem.depthMask(false);
+        RenderSystem.disableCull();
+        RenderSystem.enableBlend();
+        RenderSystem.blendFuncSeparate(
+            GlStateManager.SourceFactor.SRC_ALPHA,
+            GlStateManager.DestFactor.ONE,
+            GlStateManager.SourceFactor.ONE,
+            GlStateManager.DestFactor.ZERO
+        );
+        RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+        try {
+            starBuffer.drawWithShader(
+                pose,
+                projection,
+                LumisphericClient.getStarShader(
+                    celestialToLocal,
+                    (float) -Math.sin(geometricHorizonDip(altitude)),
+                    brightness
+                )
+            );
+        } finally {
+            VertexBuffer.unbind();
+            RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+            RenderSystem.depthMask(true);
+            RenderSystem.defaultBlendFunc();
+            RenderSystem.disableBlend();
+            RenderSystem.enableCull();
+        }
     }
 
     public static float moonIllumination(ClientLevel level) {
@@ -442,7 +744,8 @@ public final class SkyRenderer {
     }
 
     public static float starVisibility(ClientLevel level) {
-        float rain = Math.max(level.getRainLevel(1.0F), level.getThunderLevel(1.0F));
+        double cameraY = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition().y;
+        float rain = weatherStrength(level, cameraY, 1.0F);
         return (1.0F - 0.12F * moonIllumination(level)) * (1.0F - rain * 0.95F);
     }
 
@@ -549,10 +852,35 @@ public final class SkyRenderer {
         return Math.round(Math.max(0.0F, Math.min(1.0F, color)) * 255.0F);
     }
 
-    private static float twilightAmount(float sunY) {
+    private static float twilightAmount(float apparentSunElevation, float altitudeBlend) {
+        float twilightStart = mix(-0.15F, -0.30F, altitudeBlend);
+        float twilightPeak = mix(0.0F, -0.02F, altitudeBlend);
+        return smoothstep(twilightStart, twilightPeak, apparentSunElevation)
+            * (1.0F - smoothstep(0.06F, 0.22F, apparentSunElevation));
+    }
+
+    private static Twilight twilightPalette(float sunY, float altitude) {
+        float opticalDepth = solarAirMass(sunY) - 1.0F;
+        // Beer-Lambert-style attenuation removes short wavelengths faster along long solar paths.
+        float redTransmission = (float) Math.exp(-0.04F * opticalDepth);
+        float greenTransmission = (float) Math.exp(-0.13F * opticalDepth);
+        float blueTransmission = (float) Math.exp(-0.38F * opticalDepth);
+        float greenRatio = (float) Math.sqrt(greenTransmission / redTransmission);
+        float blueRatio = (float) Math.sqrt(blueTransmission / redTransmission);
         float sunElevation = (float) Math.asin(Math.max(-1.0F, Math.min(1.0F, sunY)));
-        return smoothstep(-0.15F, 0.0F, sunElevation)
-            * (1.0F - smoothstep(0.06F, 0.22F, sunElevation));
+        float apparentSunElevation = sunElevation + geometricHorizonDip(altitude);
+        float blueHour = smoothstep(0.0F, 0.12F, -apparentSunElevation);
+        float warmRed = mix(0.96F, 0.76F, blueHour);
+        float warmGreen = mix(0.28F + 0.38F * greenRatio, 0.34F, blueHour);
+        float warmBlue = mix(0.08F + 0.30F * blueRatio, 0.48F, blueHour);
+        float altitudeBlend = smoothstep(0.0F, 256.0F, altitude);
+        return new Twilight(
+            twilightAmount(apparentSunElevation, altitudeBlend) * Config.sunsetIntensity,
+            warmRed,
+            warmGreen,
+            warmBlue,
+            blueHour
+        );
     }
 
     private static float solarAirMass(float sunY) {
@@ -565,11 +893,58 @@ public final class SkyRenderer {
         return (float) Math.max(1.0, Math.min(8.0, airMass));
     }
 
+    private record Twilight(float strength, float red, float green, float blue, float blueHour) {}
+
     private static float horizonDip(double altitude) {
         double height = Math.max(0.0, altitude);
-        float geometricDip = (float) Math.acos(PLANET_RADIUS / (PLANET_RADIUS + height));
         float altitudeLayers = smoothstep(0.0F, 256.0F, (float) height);
-        return geometricDip + altitudeLayers * 0.025F;
+        return geometricHorizonDip(height) + altitudeLayers * 0.025F;
+    }
+
+    private static float geometricHorizonDip(double altitude) {
+        double height = Math.max(0.0, altitude);
+        double radius = apparentPlanetRadius(height);
+        return (float) Math.acos(radius / (radius + height));
+    }
+
+    private static double apparentPlanetRadius(double altitude) {
+        double height = Math.max(0.0, altitude);
+        if (height <= 0.01) {
+            return PLANET_RADIUS;
+        }
+        double physicalDip = Math.acos(PLANET_RADIUS / (PLANET_RADIUS + height));
+        double artisticDip = smoothstep(PLANET_CURVATURE_START, PLANET_CURVATURE_END, (float) height)
+            * PLANET_CURVATURE_MAX_DIP;
+        double totalDip = Math.min(physicalDip + artisticDip, Math.toRadians(80.0));
+        return height / (1.0 / Math.cos(totalDip) - 1.0);
+    }
+
+    private static void updatePlanetRotation(double cameraX, double cameraZ) {
+        if (Double.isNaN(previousPlanetCameraX) || Double.isNaN(previousPlanetCameraZ)) {
+            previousPlanetCameraX = cameraX;
+            previousPlanetCameraZ = cameraZ;
+            return;
+        }
+
+        double deltaX = cameraX - previousPlanetCameraX;
+        double deltaZ = cameraZ - previousPlanetCameraZ;
+        previousPlanetCameraX = cameraX;
+        previousPlanetCameraZ = cameraZ;
+        if (deltaX * deltaX + deltaZ * deltaZ > MAX_PLANET_ROTATION_STEP * MAX_PLANET_ROTATION_STEP) {
+            return;
+        }
+
+        planetRotationAroundZ = wrapAngle(
+            planetRotationAroundZ - deltaX * PLANET_ROTATION_RADIANS_PER_BLOCK
+        );
+        planetRotationAroundX = wrapAngle(
+            planetRotationAroundX + deltaZ * PLANET_ROTATION_RADIANS_PER_BLOCK
+        );
+    }
+
+    private static double wrapAngle(double angle) {
+        double fullTurn = Math.PI * 2.0;
+        return angle - Math.floor((angle + Math.PI) / fullTurn) * fullTurn;
     }
 
     private static float smoothstep(float edge0, float edge1, float value) {

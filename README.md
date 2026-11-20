@@ -12,27 +12,30 @@
     <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" />
   </p>
 
-  <p>Procedural skies, atmospheric scattering, and blocky celestial beauty for the <b>Overworld</b>.</p>
+  <p>A custom sky, clouds, and distant horizon for the <b>Overworld</b>.</p>
 </div>
 
-> **Lumispheric 1.0.0 is available** on the
-> [GitHub Releases page](https://github.com/dinnermc/Lumispheric/releases/latest).
+**Latest release: 1.1.0** — download it from
+[GitHub Releases](https://github.com/dinnermc/Lumispheric/releases/latest).
 
 ## Features
 
-- Procedural day, twilight, and night sky colors with atmospheric scattering.
-- Stable horizon fog that blends with the sky instead of changing as you turn.
-- Vanilla-style square stars, a procedural Milky Way, occasional auroras, and
-  rare shooting stars.
-- Atmospheric glow around the Sun and weather-aware clouds.
-- Extended cloud rendering with distance fading.
-- Configurable settings and Vanilla+, Realistic, and Performance presets.
-- Automatically yields sky rendering to active Iris shaderpacks.
-- High-altitude precipitation particles are suppressed above Y=1024.
+- The sky changes through day, sunrise and sunset, and night. Horizon fog
+  follows the sky color, so it stays consistent as you turn.
+- The Sun, Moon, and stars keep their familiar Minecraft look. The sky also
+  includes a Milky Way, auroras, shooting stars, and a soft glow around the Sun
+  and Moon, with lunar eclipses.
+- Clouds respond to weather and fade into the distance.
+- At high altitude, the horizon opens onto a procedural planet with land,
+  oceans, terrain, day/night lighting, and moving clouds.
+- The sky gradually darkens toward space. Stars become visible in daylight
+  once you climb high enough.
+- Choose the Vanilla+, Realistic, or Performance preset, or adjust settings in
+  the in-game configuration screen.
+- Lumispheric works alongside Sodium. When an Iris shaderpack is active, it
+  gets out of the way and restores its sky when the shaderpack is turned off.
 
-Lumispheric changes visuals on the client and is not intended to require
-installation on a multiplayer server. Sodium and Iris are optional; Iris
-shaderpacks take control of the sky while active.
+Lumispheric is client-side; other players do not need to install it.
 
 ## Requirements
 
@@ -43,8 +46,8 @@ shaderpacks take control of the sky while active.
 ## Installation
 
 1. Install Minecraft 1.21.1 with NeoForge.
-2. Download the Lumispheric `.jar` from the GitHub Releases page once a release
-   is available.
+2. Download the latest Lumispheric `.jar` from
+   [GitHub Releases](https://github.com/dinnermc/Lumispheric/releases/latest).
 3. Place the JAR in the instance's `mods` folder and launch the game.
 4. Open Lumispheric's configuration screen from the mod list to adjust the sky.
 
@@ -66,18 +69,42 @@ The built mod is written to `build/libs/`.
 
 ## Configuration
 
-The in-game configuration screen includes atmospheric and night/cloud settings,
-three presets, and a toggle to compare Lumispheric with the vanilla sky.
+Use the in-game configuration screen to change sky, night, and cloud settings,
+select a preset, or switch Lumispheric off to compare it with the vanilla sky.
 Settings are client-side.
+
+### Custom star catalogs
+
+Resource packs can add or replace stars with JSON files under
+`assets/lumispheric/stars/`. Files are read in sorted path order. Set
+`"replace": true` to clear the built-in catalog before loading that file.
+Reloading resources updates the catalog; stars keep their celestial positions
+as the sky moves.
+
+```json
+{
+  "replace": false,
+  "stars": [
+    {
+      "ra_hours": 6.7525,
+      "dec_degrees": -16.7161,
+      "magnitude": -1.46,
+      "color_index": 0.0
+    }
+  ]
+}
+```
+
+Right ascension is in hours (`0` to `<24`), declination in degrees (`-90` to
+`90`), and magnitude and color index must be finite numbers. Custom stars use
+the same color mapping as the built-in catalog.
 
 ## Compatibility
 
 - **Sodium:** supported.
 - **Iris:** Lumispheric disables its custom sky while a shaderpack is active and
   resumes when shaders are turned off.
-- Mods that also modify the sky, fog, clouds, or celestial rendering may
-  conflict and cause visual issues. Compatibility depends on the specific mods
-  and their versions.
+- Mods that change the sky, fog, clouds, or Sun and Moon rendering may conflict.
 - **Other dimensions:** Lumispheric's custom sky is limited to the Overworld.
 
 ## License and third-party data

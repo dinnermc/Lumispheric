@@ -15,10 +15,12 @@
   "config.lumispheric.milky_way_brightness": "Milky Way brightness: %s",
   "config.lumispheric.mie_intensity": "Atmospheric halo: %s",
   "config.lumispheric.latitude": "Sky latitude: %s",
+  "config.lumispheric.celestial_size": "Sun and Moon size: %s",
   "config.lumispheric.cloud_distance": "Distant clouds: %s",
   "config.lumispheric.tooltip.sunset_intensity": "Adjusts the warm tint around the Sun at sunrise and sunset.",
   "config.lumispheric.tooltip.mie_intensity": "Controls the soft atmospheric halo around the Sun.",
   "config.lumispheric.tooltip.latitude": "Adjusts the apparent path of celestial bodies.",
+  "config.lumispheric.tooltip.celestial_size": "Changes the size of the Sun and Moon, from 25% to 100% of vanilla.",
   "config.lumispheric.tooltip.star_brightness": "Adjusts star brightness at night.",
   "config.lumispheric.tooltip.milky_way_brightness": "Adjusts the brightness of the Milky Way band.",
   "config.lumispheric.tooltip.cloud_distance": "Extends cloud render distance; lower values reduce that extension."

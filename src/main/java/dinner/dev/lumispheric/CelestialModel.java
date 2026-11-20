@@ -11,6 +11,9 @@ public final class CelestialModel {
     private static final double SYNODIC_MONTH_DAYS = 29.530588853;
     private static final double LUNAR_INCLINATION = Math.toRadians(5.145);
     private static final double EARTH_OBLIQUITY = Math.toRadians(23.43928);
+    private static final double LUNAR_ANGULAR_RADIUS = Math.toRadians(0.26);
+    private static final double EARTH_UMBRA_ANGULAR_RADIUS = Math.toRadians(0.70);
+    private static final double EARTH_PENUMBRA_ANGULAR_RADIUS = Math.toRadians(1.22);
     private static final Equatorial GALACTIC_NORTH = new Equatorial(
         Math.toRadians(192.85948), Math.toRadians(27.12825)
     );
@@ -58,12 +61,28 @@ public final class CelestialModel {
         return center.mul(100.0F).add(offset);
     }
 
+    public static float localUpFromPreSky(Vector3f position, float vanillaSkyAngle) {
+        double angle = vanillaSkyAngle * TWO_PI;
+        double localUp = position.y * Math.cos(angle) - position.z * Math.sin(angle);
+        return (float) (localUp / Math.max(position.length(), 0.0001F));
+    }
+
+    public static SkyMeshDirection skyMeshDirection(Direction direction, float vanillaSkyAngle) {
+        Vector3f position = toPreSkyCoordinates(direction, vanillaSkyAngle);
+        return new SkyMeshDirection(position.x, position.y, position.z);
+    }
+
     public static float moonIllumination(double dayTime) {
         return (1.0F + (float) Math.cos(lunarCycle(dayTime) * TWO_PI)) * 0.5F;
     }
 
     public static int moonPhase(double dayTime) {
-        return (int) (lunarCycle(dayTime) * 8.0) & 7;
+        double cycle = lunarCycle(dayTime);
+        int phase = (int) (cycle * 8.0) & 7;
+        if (phase == 4 && moonIllumination(dayTime) > 0.01F) {
+            return cycle < 0.5 ? 3 : 5;
+        }
+        return phase;
     }
 
     public static float eclipseStrength(double dayTime, double latitude) {
@@ -99,6 +118,25 @@ public final class CelestialModel {
         );
         float daylight = smoothstep(-0.02F, 0.03F, (float) sun.up);
         return newMoon * nodeAlignment * overlap * daylight;
+    }
+
+    public static LunarEclipse lunarEclipse(double dayTime, double latitude) {
+        Direction sun = sunDirection(dayTime, latitude);
+        Direction moon = moonDirection(dayTime, latitude);
+        double dot = -sun.east * moon.east - sun.up * moon.up - sun.south * moon.south;
+        double separation = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
+        double longitude = solarLongitude(dayTime) + Math.PI + TWO_PI * lunarCycle(dayTime);
+        double longitudeOffset = wrapRadians(longitude - solarLongitude(dayTime) - Math.PI);
+        double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * daysSinceReference(dayTime));
+        double eclipticLatitude = Math.asin(
+            Math.sin(LUNAR_INCLINATION) * Math.sin(longitude - nodeLongitude)
+        );
+        return new LunarEclipse(
+            circleOverlapFraction(separation, EARTH_PENUMBRA_ANGULAR_RADIUS),
+            circleOverlapFraction(separation, EARTH_UMBRA_ANGULAR_RADIUS),
+            (float) (-longitudeOffset * Math.cos(eclipticLatitude) / LUNAR_ANGULAR_RADIUS),
+            (float) (-eclipticLatitude / LUNAR_ANGULAR_RADIUS)
+        );
     }
 
     public static double localSiderealTime(double dayTime) {
@@ -170,12 +208,53 @@ public final class CelestialModel {
         return REFERENCE_DAY_OF_YEAR + (dayTime - REFERENCE_TICK) / 24_000.0;
     }
 
+    private static double wrapRadians(double angle) {
+        return angle - Math.floor((angle + Math.PI) / TWO_PI) * TWO_PI;
+    }
+
+    private static float circleOverlapFraction(double separation, double shadowRadius) {
+        double moonRadius = LUNAR_ANGULAR_RADIUS;
+        if (separation >= shadowRadius + moonRadius) {
+            return 0.0F;
+        }
+        if (separation <= Math.abs(shadowRadius - moonRadius)) {
+            return shadowRadius >= moonRadius ? 1.0F : (float) (shadowRadius * shadowRadius
+                / (moonRadius * moonRadius));
+        }
+
+        double moonAngle = Math.acos(
+            (separation * separation + moonRadius * moonRadius - shadowRadius * shadowRadius)
+                / (2.0 * separation * moonRadius)
+        );
+        double shadowAngle = Math.acos(
+            (separation * separation + shadowRadius * shadowRadius - moonRadius * moonRadius)
+                / (2.0 * separation * shadowRadius)
+        );
+        double overlapArea = moonRadius * moonRadius * moonAngle
+            + shadowRadius * shadowRadius * shadowAngle
+            - 0.5 * Math.sqrt(
+                (-separation + moonRadius + shadowRadius)
+                    * (separation + moonRadius - shadowRadius)
+                    * (separation - moonRadius + shadowRadius)
+                    * (separation + moonRadius + shadowRadius)
+            );
+        return (float) Math.max(0.0, Math.min(1.0, overlapArea / (Math.PI * moonRadius * moonRadius)));
+    }
+
     private static float smoothstep(float edge0, float edge1, float value) {
         float x = Math.max(0.0F, Math.min(1.0F, (value - edge0) / (edge1 - edge0)));
         return x * x * (3.0F - 2.0F * x);
     }
 
     public record Direction(double east, double up, double south) {}
+
+    public record LunarEclipse(
+        float penumbra, float umbra, float shadowOffsetX, float shadowOffsetY
+    ) {}
+
+    public record SkyMeshDirection(float x, float y, float z) {}
+
+    public record QuadVertex(float x, float y, float z, float u, float v, float localUp) {}
 
     private record Equatorial(double rightAscension, double declination) {}
 }

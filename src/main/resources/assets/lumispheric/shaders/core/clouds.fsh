@@ -6,10 +6,13 @@ uniform float FogStart;
 uniform float FogEnd;
 uniform float CloudRain;
 uniform float CloudThunder;
+uniform vec3 CloudSunDirection;
+uniform float CloudDeckOpacity;
 
 in vec2 texCoord0;
 in float vertexDistance;
 in vec4 vertexColor;
+in vec3 cloudNormal;
 
 out vec4 fragColor;
 
@@ -18,6 +21,15 @@ void main() {
     if (color.a < 0.1) {
         discard;
     }
+    color.a *= clamp(CloudDeckOpacity, 0.0, 1.0);
+    if (color.a <= 0.01) {
+        discard;
+    }
+
+    vec3 normal = normalize(cloudNormal);
+    float directLight = max(dot(normal, normalize(CloudSunDirection)), 0.0);
+    float volumeLight = 0.70 + max(normal.y, 0.0) * 0.08 + directLight * 0.22;
+    color.rgb *= volumeLight;
 
     float rain = clamp(CloudRain, 0.0, 1.0);
     float thunder = clamp(CloudThunder, 0.0, 1.0);

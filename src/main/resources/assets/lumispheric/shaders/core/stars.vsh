@@ -7,12 +7,12 @@ uniform mat4 ModelViewMat;
 uniform mat4 ProjMat;
 uniform mat4 CelestialToLocal;
 
-out vec4 vertexColor;
 out vec3 localPosition;
+out vec4 vertexColor;
 
 void main() {
-    vec4 localVertex = CelestialToLocal * vec4(Position, 1.0);
-    localPosition = localVertex.xyz;
+    vec4 local = CelestialToLocal * vec4(Position, 1.0);
+    localPosition = local.xyz;
     vertexColor = Color;
-    gl_Position = ProjMat * ModelViewMat * localVertex;
+    gl_Position = ProjMat * ModelViewMat * local;
 }
