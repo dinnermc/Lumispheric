@@ -16,7 +16,7 @@
 </div>
 
 **Latest release: 1.1.0** — download it from
-[GitHub Releases](https://github.com/dinnermc/Lumispheric/releases/latest).
+[GitHub Releases](https://github.com/dinnermc/Lumispheric/releases/latest) or [Modrinth](https://modrinth.com/mod/lumispheric).
 
 ## Features
 
