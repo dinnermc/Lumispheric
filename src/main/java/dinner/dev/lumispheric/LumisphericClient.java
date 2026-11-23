@@ -11,6 +11,7 @@ import net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent;
 import net.neoforged.neoforge.client.event.RegisterShadersEvent;
 import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import org.joml.Matrix4f;
+import org.joml.Vector3f;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -72,7 +73,7 @@ public final class LumisphericClient {
                 shader -> planetShader = shader
             );
         } catch (IOException exception) {
-            throw new IllegalStateException("Failed to load Lumispheric's procedural planet shader.", exception);
+            throw new IllegalStateException("Failed to load Lumispheric's procedural sky and planet shader.", exception);
         }
         try {
             event.registerShader(
@@ -101,23 +102,48 @@ public final class LumisphericClient {
     }
 
     public static ShaderInstance getCloudShader(
-        float rain, float thunder, CelestialModel.Direction sun, float deckOpacity
+        float rain,
+        float thunder,
+        CelestialModel.Direction sun,
+        CelestialModel.Direction moon,
+        float deckOpacity,
+        float twilightRed,
+        float twilightGreen,
+        float twilightBlue,
+        float twilightStrength,
+        float moonIllumination,
+        float nightStrength,
+        float sunElevation,
+        float biomeDust
     ) {
         ShaderInstance shader = Objects.requireNonNull(
             cloudShader, "Lumispheric cloud shader has not been registered"
         );
-        setCloudWeather(shader, "CloudRain", rain);
-        setCloudWeather(shader, "CloudThunder", thunder);
+        requireUniform(shader, "CloudRain").set(rain);
+        requireUniform(shader, "CloudThunder").set(thunder);
         requireUniform(shader, "CloudSunDirection").set(
-            (float) sun.east(),
-            (float) sun.up(),
-            (float) sun.south()
+            (float) sun.east(), (float) sun.up(), (float) sun.south()
+        );
+        requireUniform(shader, "CloudMoonDirection").set(
+            (float) moon.east(), (float) moon.up(), (float) moon.south()
         );
         requireUniform(shader, "CloudDeckOpacity").set(deckOpacity);
+        requireUniform(shader, "CloudTwilightColor").set(
+            twilightRed, twilightGreen, twilightBlue, twilightStrength
+        );
+        requireUniform(shader, "CloudMoonParams").set(
+            moonIllumination, nightStrength, sunElevation, biomeDust
+        );
         return shader;
     }
 
-    public static ShaderInstance getStarShader(Matrix4f celestialToLocal, float horizonLevel, float brightness) {
+    public static ShaderInstance getStarShader(
+        Matrix4f celestialToLocal,
+        float horizonLevel,
+        float brightness,
+        float gameTimeSeconds,
+        float spaceBlend
+    ) {
         ShaderInstance shader = Objects.requireNonNull(
             starShader, "Lumispheric star shader has not been registered"
         );
@@ -125,6 +151,7 @@ public final class LumisphericClient {
         requireUniform(shader, "HorizonLevel").set(horizonLevel);
         requireUniform(shader, "HorizonFadeWidth").set((float) Math.sin(Math.toRadians(0.6)));
         requireUniform(shader, "ColorModulator").set(brightness, brightness, brightness, 1.0F);
+        requireUniform(shader, "StarAtmosphere").set(gameTimeSeconds, spaceBlend, 0.0F, 0.0F);
         return shader;
     }
 
@@ -133,10 +160,33 @@ public final class LumisphericClient {
         CelestialModel.Direction moon,
         float sunElevation,
         float moonIllumination,
+        float rain,
+        float eclipseStrength,
+        float horizonDip,
+        float geometricDip,
+        float cameraHeight,
+        float spaceBlend,
+        float sunsetIntensity,
+        float mieIntensity,
+        float biomeDust,
+        float biomeClearness,
+        float twilightRed,
+        float twilightGreen,
+        float twilightBlue,
+        float twilightStrength,
+        float blueHour,
+        float auroraStrength,
+        float auroraHemisphere,
+        float pixelatedStyle,
+        float meteorStartAzimuth,
+        float meteorStartElevation,
+        float meteorAzimuthDelta,
+        float meteorElevationDelta,
+        float meteorProgress,
+        float meteorActive,
+        float gameTimeSeconds,
         float cloudWindAngle,
         float planetRadius,
-        float cameraHeight,
-        float horizonDip,
         float planetBlend,
         float planetRotationAroundZ,
         float planetRotationAroundX
@@ -145,23 +195,35 @@ public final class LumisphericClient {
             planetShader, "Lumispheric planet shader has not been registered"
         );
         requireUniform(shader, "SunDirection").set(
-            (float) sun.east(),
-            (float) sun.up(),
-            (float) sun.south()
+            (float) sun.east(), (float) sun.up(), (float) sun.south()
         );
         requireUniform(shader, "MoonDirection").set(
-            (float) moon.east(),
-            (float) moon.up(),
-            (float) moon.south()
+            (float) moon.east(), (float) moon.up(), (float) moon.south()
         );
-        requireUniform(shader, "SunElevation").set(sunElevation);
-        requireUniform(shader, "MoonIllumination").set(moonIllumination);
-        requireUniform(shader, "CloudWindAngle").set(cloudWindAngle);
-        requireUniform(shader, "PlanetRadius").set(planetRadius);
-        requireUniform(shader, "CameraHeight").set(cameraHeight);
-        requireUniform(shader, "HorizonDip").set(horizonDip);
-        requireUniform(shader, "PlanetBlend").set(planetBlend);
-        requireUniform(shader, "PlanetRotation").set(planetRotationAroundZ, planetRotationAroundX);
+        requireUniform(shader, "SkyParams0").set(
+            sunElevation, moonIllumination, rain, eclipseStrength
+        );
+        requireUniform(shader, "SkyParams1").set(
+            horizonDip, geometricDip, cameraHeight, spaceBlend
+        );
+        requireUniform(shader, "SkyParams2").set(
+            sunsetIntensity, mieIntensity, biomeDust, biomeClearness
+        );
+        requireUniform(shader, "TwilightColor").set(
+            twilightRed, twilightGreen, twilightBlue, twilightStrength
+        );
+        requireUniform(shader, "TwilightExtra").set(
+            blueHour, auroraStrength, auroraHemisphere, pixelatedStyle
+        );
+        requireUniform(shader, "MeteorStart").set(
+            meteorStartAzimuth, meteorStartElevation, meteorAzimuthDelta, meteorElevationDelta
+        );
+        requireUniform(shader, "MeteorParams").set(
+            meteorProgress, meteorActive, gameTimeSeconds, cloudWindAngle
+        );
+        requireUniform(shader, "PlanetParams").set(
+            planetRadius, planetBlend, planetRotationAroundZ, planetRotationAroundX
+        );
         requireUniform(shader, "ColorModulator").set(1.0F, 1.0F, 1.0F, 1.0F);
         return shader;
     }
@@ -169,28 +231,44 @@ public final class LumisphericClient {
     public static ShaderInstance getMilkyWayShader(
         CelestialModel.Direction galacticNorth,
         CelestialModel.Direction galacticCenter,
-        float strength
+        float strength,
+        float geometricHorizonDip,
+        float spaceBlend,
+        float pixelatedStyle,
+        float planetBlend
     ) {
         ShaderInstance shader = Objects.requireNonNull(
             milkyWayShader, "Lumispheric Milky Way shader has not been registered"
         );
         requireUniform(shader, "GalacticNorth").set(
-            (float) galacticNorth.east(),
-            (float) galacticNorth.up(),
-            (float) galacticNorth.south()
+            (float) galacticNorth.east(), (float) galacticNorth.up(), (float) galacticNorth.south()
         );
         requireUniform(shader, "GalacticCenter").set(
-            (float) galacticCenter.east(),
-            (float) galacticCenter.up(),
-            (float) galacticCenter.south()
+            (float) galacticCenter.east(), (float) galacticCenter.up(), (float) galacticCenter.south()
         );
         requireUniform(shader, "MilkyWayStrength").set(strength);
+        requireUniform(shader, "MilkyWayParams").set(
+            geometricHorizonDip, spaceBlend, pixelatedStyle, planetBlend
+        );
         return shader;
     }
 
     public static ShaderInstance getCelestialShader(
-        float red, float green, float blue, float alpha, float glowScale,
-        float lunarShadowOffsetX, float lunarShadowOffsetY, boolean moonPass
+        float red,
+        float green,
+        float blue,
+        float alpha,
+        float glowScale,
+        float lunarShadowOffsetX,
+        float lunarShadowOffsetY,
+        boolean moonPass,
+        float planetMode,
+        float planetType,
+        Vector3f bodyLightDir,
+        float pixelatedStyle,
+        float earthshine,
+        float spyglassZoom,
+        float solarEclipse
     ) {
         ShaderInstance shader = Objects.requireNonNull(
             celestialShader, "Lumispheric celestial shader has not been registered"
@@ -200,6 +278,10 @@ public final class LumisphericClient {
         requireUniform(shader, "GlowScale").set(glowScale);
         requireUniform(shader, "LunarShadowOffset").set(lunarShadowOffsetX, lunarShadowOffsetY);
         requireUniform(shader, "MoonPass").set(moonPass ? 1.0F : 0.0F);
+        requireUniform(shader, "PlanetPass").set(planetMode);
+        requireUniform(shader, "PlanetType").set(planetType);
+        requireUniform(shader, "BodyLightDir").set(bodyLightDir.x, bodyLightDir.y, bodyLightDir.z);
+        requireUniform(shader, "StyleParams").set(pixelatedStyle, earthshine, spyglassZoom, solarEclipse);
         return shader;
     }
 
@@ -209,9 +291,5 @@ public final class LumisphericClient {
             throw new IllegalStateException("Lumispheric shader is missing the " + name + " uniform");
         }
         return uniform;
-    }
-
-    private static void setCloudWeather(ShaderInstance shader, String name, float value) {
-        requireUniform(shader, name).set(value);
     }
 }

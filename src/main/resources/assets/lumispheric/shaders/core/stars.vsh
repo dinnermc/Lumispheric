@@ -8,11 +8,13 @@ uniform mat4 ProjMat;
 uniform mat4 CelestialToLocal;
 
 out vec3 localPosition;
+out vec3 starSeedDir;
 out vec4 vertexColor;
 
 void main() {
     vec4 local = CelestialToLocal * vec4(Position, 1.0);
     localPosition = local.xyz;
+    starSeedDir = normalize(Position);
     vertexColor = Color;
     gl_Position = ProjMat * ModelViewMat * local;
 }

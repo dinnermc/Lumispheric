@@ -15,25 +15,35 @@
   <p>A custom sky, clouds, and distant horizon for the <b>Overworld</b>.</p>
 </div>
 
-**Latest release: 1.1.0** — download it from
+**Latest release: 1.2.0** — download it from
 [GitHub Releases](https://github.com/dinnermc/Lumispheric/releases/latest) or [Modrinth](https://modrinth.com/mod/lumispheric).
 
 ## Features
 
-- The sky changes through day, sunrise and sunset, and night. Horizon fog
-  follows the sky color, so it stays consistent as you turn.
-- The Sun, Moon, and stars keep their familiar Minecraft look. The sky also
-  includes a Milky Way, auroras, shooting stars, and a soft glow around the Sun
-  and Moon, with lunar eclipses.
-- Clouds respond to weather and fade into the distance.
-- At high altitude, the horizon opens onto a procedural planet with land,
-  oceans, terrain, day/night lighting, and moving clouds.
-- The sky gradually darkens toward space. Stars become visible in daylight
-  once you climb high enough.
-- Choose the Vanilla+, Realistic, or Performance preset, or adjust settings in
-  the in-game configuration screen.
-- Lumispheric works alongside Sodium. When an Iris shaderpack is active, it
-  gets out of the way and restores its sky when the shaderpack is turned off.
+- GPU-rendered Overworld atmosphere with rich day, sunrise, sunset, Belt of
+  Venus, Earth's shadow, and night transitions. Horizon fog stays consistent
+  with the sky and responds smoothly to weather and biomes.
+- Familiar Minecraft Sun and Moon with atmospheric horizon reddening,
+  continuous Sun-aligned lunar phases with earthshine, soft glows, and solar
+  and lunar eclipses.
+- Real star positions and B-V colors from the HYG star database, with
+  atmospheric twinkling near the horizon that fades away in space.
+- Real-orbit Solar System planets that shine like bright, non-twinkling stars
+  at night and resolve into detailed disks (with real phases and Saturn's
+  rings) when viewed through a Spyglass.
+- Procedural Milky Way anchored in galactic coordinates, polar-aligned
+  auroras, and smooth real-time shooting stars.
+- Extended vanilla clouds tinted by sunrise, sunset, moonlight, and weather
+  that fade cleanly into the distance.
+- At high altitude, the horizon opens onto a procedural planet with continents,
+  oceans, swirling weather clouds casting ground shadows, an atmospheric limb,
+  and gradual transition into deep space.
+- Switch between **Minecraft (Pixel)** and **Realistic (Smooth)** visual
+  styles, adjust the astronomical year length and latitude, or pick from
+  Vanilla+, Realistic, and Performance presets in a live-preview configuration
+  screen.
+- Works alongside Sodium. When an Iris shaderpack is active, Lumispheric gets
+  out of the way and restores its sky when the shaderpack is turned off.
 
 Lumispheric is client-side; other players do not need to install it.
 
@@ -69,9 +79,10 @@ The built mod is written to `build/libs/`.
 
 ## Configuration
 
-Use the in-game configuration screen to change sky, night, and cloud settings,
-select a preset, or switch Lumispheric off to compare it with the vanilla sky.
-Settings are client-side.
+Use the in-game configuration screen to adjust sky, night, orbit, and cloud
+settings with live preview, switch between Minecraft (Pixel) and Realistic
+(Smooth) styles, pick a preset, or toggle Lumispheric off to compare with the
+vanilla sky. Settings are client-side.
 
 ### Custom star catalogs
 

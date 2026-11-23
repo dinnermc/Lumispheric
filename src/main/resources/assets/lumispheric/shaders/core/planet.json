@@ -17,14 +17,14 @@
     },
     { "name": "SunDirection", "type": "float", "count": 3, "values": [ 0.0, 1.0, 0.0 ] },
     { "name": "MoonDirection", "type": "float", "count": 3, "values": [ 0.0, -1.0, 0.0 ] },
-    { "name": "SunElevation", "type": "float", "count": 1, "values": [ 1.0 ] },
-    { "name": "MoonIllumination", "type": "float", "count": 1, "values": [ 0.5 ] },
-    { "name": "CloudWindAngle", "type": "float", "count": 1, "values": [ 0.0 ] },
-    { "name": "PlanetRadius", "type": "float", "count": 1, "values": [ 6371000.0 ] },
-    { "name": "CameraHeight", "type": "float", "count": 1, "values": [ 0.0 ] },
-    { "name": "HorizonDip", "type": "float", "count": 1, "values": [ 0.0 ] },
-    { "name": "PlanetBlend", "type": "float", "count": 1, "values": [ 0.0 ] },
-    { "name": "PlanetRotation", "type": "float", "count": 2, "values": [ 0.0, 0.0 ] },
+    { "name": "SkyParams0", "type": "float", "count": 4, "values": [ 1.0, 0.5, 0.0, 0.0 ] },
+    { "name": "SkyParams1", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+    { "name": "SkyParams2", "type": "float", "count": 4, "values": [ 0.85, 0.7, 0.0, 0.0 ] },
+    { "name": "TwilightColor", "type": "float", "count": 4, "values": [ 0.96, 0.5, 0.2, 0.0 ] },
+    { "name": "TwilightExtra", "type": "float", "count": 4, "values": [ 0.0, 0.0, 1.0, 1.0 ] },
+    { "name": "MeteorStart", "type": "float", "count": 4, "values": [ 0.0, 0.5, 0.0, 0.0 ] },
+    { "name": "MeteorParams", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+    { "name": "PlanetParams", "type": "float", "count": 4, "values": [ 6371000.0, 0.0, 0.0, 0.0 ] },
     { "name": "ColorModulator", "type": "float", "count": 4, "values": [ 1.0, 1.0, 1.0, 1.0 ] }
   ]
 }

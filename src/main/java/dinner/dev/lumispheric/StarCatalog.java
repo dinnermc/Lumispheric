@@ -171,9 +171,10 @@ final class StarCatalog extends SimplePreparableReloadListener<List<StarCatalog.
         double centerX = directionX * STAR_RADIUS;
         double centerY = directionY * STAR_RADIUS;
         double centerZ = directionZ * STAR_RADIUS;
-        float red = clamp(1.0F + Math.min(0.0F, colorIndex) * 0.20F, 0.84F, 1.0F);
-        float green = clamp(1.0F - Math.max(0.0F, colorIndex) * 0.08F, 0.86F, 1.0F);
-        float blue = clamp(1.0F - Math.max(0.0F, colorIndex) * 0.16F, 0.68F, 1.0F);
+        float[] rgb = bvToRgb(colorIndex);
+        float red = rgb[0];
+        float green = rgb[1];
+        float blue = rgb[2];
 
         addVertex(builder, centerX - rightX - verticalX, centerY - rightY - verticalY,
             centerZ - rightZ - verticalZ, red, green, blue, intensity);
@@ -183,6 +184,41 @@ final class StarCatalog extends SimplePreparableReloadListener<List<StarCatalog.
             centerZ + rightZ + verticalZ, red, green, blue, intensity);
         addVertex(builder, centerX - rightX + verticalX, centerY - rightY + verticalY,
             centerZ - rightZ + verticalZ, red, green, blue, intensity);
+    }
+
+    private static float[] bvToRgb(float bvInput) {
+        // Ballesteros B-V to effective temperature, mapped to a natural (softly desaturated) starlight RGB.
+        float bv = clamp(bvInput, -0.4F, 2.0F);
+        float r;
+        float g;
+        float b;
+        if (bv < 0.0F) {
+            float t = (bv + 0.4F) / 0.4F;
+            r = 0.62F + 0.34F * t;
+            g = 0.76F + 0.22F * t;
+            b = 1.00F;
+        } else if (bv < 0.4F) {
+            float t = bv / 0.4F;
+            r = 0.96F + 0.04F * t;
+            g = 0.98F - 0.01F * t;
+            b = 1.00F - 0.08F * t;
+        } else if (bv < 1.0F) {
+            float t = (bv - 0.4F) / 0.6F;
+            r = 1.00F;
+            g = 0.97F - 0.14F * t;
+            b = 0.92F - 0.32F * t;
+        } else {
+            float t = (bv - 1.0F) / 1.0F;
+            r = 1.00F;
+            g = 0.83F - 0.28F * t;
+            b = 0.60F - 0.34F * t;
+        }
+        // Subtle softening toward white so star colors remain authentic to the naked human eye.
+        float saturation = 0.78F;
+        r = 1.0F - (1.0F - r) * saturation;
+        g = 1.0F - (1.0F - g) * saturation;
+        b = 1.0F - (1.0F - b) * saturation;
+        return new float[] { clamp(r, 0.0F, 1.0F), clamp(g, 0.0F, 1.0F), clamp(b, 0.0F, 1.0F) };
     }
 
     private static void addVertex(

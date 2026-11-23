@@ -30,6 +30,12 @@ public final class Config {
     private static final ModConfigSpec.DoubleValue CELESTIAL_SIZE = BUILDER
         .comment("Relative size of the Sun and Moon.")
         .defineInRange("celestialSize", 0.65, 0.25, 1.0);
+    private static final ModConfigSpec.DoubleValue YEAR_LENGTH_DAYS = BUILDER
+        .comment("Length of an astronomical year in Minecraft days (controls seasonal Sun path and planetary motion).")
+        .defineInRange("yearLengthDays", 48.0, 16.0, 365.2422);
+    private static final ModConfigSpec.BooleanValue PIXELATED_STYLE = BUILDER
+        .comment("Use Minecraft-style pixelated shading for spyglass planets, Milky Way, auroras, and high-altitude planet.")
+        .define("pixelatedStyle", true);
 
     static final ModConfigSpec SPEC = BUILDER.build();
 
@@ -41,6 +47,8 @@ public final class Config {
     public static double latitude = 40.0;
     public static float cloudDistance = 1.0F;
     public static float celestialSize = 0.65F;
+    public static double yearLengthDays = 48.0;
+    public static boolean pixelatedStyle = true;
 
     private Config() {}
 
@@ -84,6 +92,17 @@ public final class Config {
         celestialSize = (float) value;
     }
 
+    public static void setYearLengthDays(double value) {
+        double clamped = Math.max(16.0, Math.min(365.2422, value));
+        YEAR_LENGTH_DAYS.set(clamped);
+        yearLengthDays = clamped;
+    }
+
+    public static void setPixelatedStyle(boolean value) {
+        PIXELATED_STYLE.set(value);
+        pixelatedStyle = value;
+    }
+
     public static void save() {
         SPEC.save();
     }
@@ -101,5 +120,7 @@ public final class Config {
         latitude = LATITUDE.get();
         cloudDistance = CLOUD_DISTANCE.get().floatValue();
         celestialSize = CELESTIAL_SIZE.get().floatValue();
+        yearLengthDays = YEAR_LENGTH_DAYS.get();
+        pixelatedStyle = PIXELATED_STYLE.get();
     }
 }

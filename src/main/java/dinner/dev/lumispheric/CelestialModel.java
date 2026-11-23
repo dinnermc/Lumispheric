@@ -1,7 +1,6 @@
 package dinner.dev.lumispheric;
 
 import org.joml.Matrix4f;
-import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public final class CelestialModel {
@@ -20,6 +19,36 @@ public final class CelestialModel {
     private static final Equatorial GALACTIC_CENTER = new Equatorial(
         Math.toRadians(266.4051), Math.toRadians(-28.936175)
     );
+    private static final PlanetElements EARTH_ELEMENTS = new PlanetElements(
+        "Earth", 0.0, 0.0, 282.9404, 1.000000, 0.016709,
+        356.0470, 0.9856002585,
+        0.0, 0.0, 0.0, 0.0,
+        1.0F, 1.0F, 1.0F, 0.0F, 0.0
+    );
+    private static final PlanetElements[] PLANET_ELEMENTS = {
+        new PlanetElements("Mercury", 48.3313, 7.0047, 29.1241, 0.387098,
+            0.205635, 168.6562, 4.0923344368, 3.24587e-5, 5.0e-8,
+            1.01444e-5, 5.59e-10, 0.94F, 0.90F, 0.82F, 0.052F, -0.42),
+        new PlanetElements("Venus", 76.6799, 3.3946, 54.8910, 0.723330,
+            0.006773, 48.0052, 1.6021302244, 2.4659e-5, 2.75e-8,
+            1.3830e-5, -1.302e-9, 1.00F, 0.94F, 0.78F, 0.088F, -4.40),
+        EARTH_ELEMENTS,
+        new PlanetElements("Mars", 49.5574, 1.8497, 286.5016, 1.523688,
+            0.093405, 18.5987, 0.5240207766, 2.11081e-5, -1.78e-8,
+            2.92961e-5, 2.516e-9, 1.00F, 0.62F, 0.42F, 0.068F, -1.52),
+        new PlanetElements("Jupiter", 100.4542, 1.3030, 273.8777, 5.202560,
+            0.048498, 19.8950, 0.0830853001, 2.76854e-5, -1.557e-7,
+            1.64505e-5, 4.469e-9, 0.98F, 0.90F, 0.74F, 0.132F, -9.40),
+        new PlanetElements("Saturn", 113.6634, 2.4886, 339.3939, 9.554750,
+            0.055546, 316.9670, 0.0334442282, 2.38980e-5, -1.081e-7,
+            2.97661e-5, -9.499e-9, 0.98F, 0.88F, 0.68F, 0.115F, -8.88),
+        new PlanetElements("Uranus", 74.0005, 0.7733, 96.6612, 19.18171,
+            0.047318, 142.5905, 0.011725806, 1.3978e-5, 1.9e-8,
+            3.0565e-5, 7.45e-9, 0.68F, 0.90F, 0.96F, 0.062F, -7.19),
+        new PlanetElements("Neptune", 131.7806, 1.7700, 272.8461, 30.05826,
+            0.008606, 260.5944, 0.005995147, 3.0173e-5, -2.55e-7,
+            -6.027e-6, 2.15e-9, 0.48F, 0.66F, 1.00F, 0.062F, -6.87)
+    };
     private static final double TWO_PI = Math.PI * 2.0;
 
     private CelestialModel() {}
@@ -28,13 +57,17 @@ public final class CelestialModel {
         return Math.toRadians(Config.latitude);
     }
 
+    public static double configuredDaysPerYear() {
+        return Math.max(16.0, Config.yearLengthDays);
+    }
+
     public static Direction sunDirection(double dayTime, double latitude) {
         return localDirection(toEquatorial(solarLongitude(dayTime), 0.0), dayTime, latitude);
     }
 
     public static Direction moonDirection(double dayTime, double latitude) {
         double longitude = solarLongitude(dayTime) + Math.PI + TWO_PI * lunarCycle(dayTime);
-        double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * daysSinceReference(dayTime));
+        double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * scaledYearDays(dayTime));
         double eclipticLatitude = Math.asin(
             Math.sin(LUNAR_INCLINATION) * Math.sin(longitude - nodeLongitude)
         );
@@ -49,27 +82,78 @@ public final class CelestialModel {
         return localDirection(GALACTIC_CENTER, dayTime, latitude);
     }
 
-    public static Vector3f transformQuadVertex(
-        float x, float y, float z, Direction direction, float vanillaSkyAngle, float centerY
+    public static BillboardBasis billboardBasis(Direction direction) {
+        Vector3f forward = new Vector3f(
+            (float) direction.east(), (float) direction.up(), (float) direction.south()
+        ).normalize();
+        Vector3f referenceUp = Math.abs(forward.y) > 0.97F
+            ? new Vector3f(0.0F, 0.0F, 1.0F)
+            : new Vector3f(0.0F, 1.0F, 0.0F);
+        Vector3f right = new Vector3f(referenceUp).cross(forward).normalize();
+        Vector3f up = new Vector3f(forward).cross(right).normalize();
+        return new BillboardBasis(forward, right, up);
+    }
+
+    public static QuadVertex[] buildOrientedQuad(
+        Direction direction,
+        float halfSize,
+        float u0,
+        float v0,
+        float u1,
+        float v1,
+        float vanillaSkyAngle,
+        BillboardBasis basis
     ) {
-        Vector3f center = toPreSkyCoordinates(direction, vanillaSkyAngle);
-        float normal = centerY > 0.0F ? 1.0F : -1.0F;
-        Quaternionf rotation = new Quaternionf().rotationTo(
-            0.0F, normal, 0.0F, center.x, center.y, center.z
+        Vector3f p00 = localToPreSky(
+            new Vector3f(basis.forward()).mul(100.0F)
+                .add(new Vector3f(basis.right()).mul(-halfSize))
+                .add(new Vector3f(basis.up()).mul(halfSize)),
+            vanillaSkyAngle
         );
-        Vector3f offset = new Vector3f(x, y - centerY, z).rotate(rotation);
-        return center.mul(100.0F).add(offset);
+        Vector3f p10 = localToPreSky(
+            new Vector3f(basis.forward()).mul(100.0F)
+                .add(new Vector3f(basis.right()).mul(halfSize))
+                .add(new Vector3f(basis.up()).mul(halfSize)),
+            vanillaSkyAngle
+        );
+        Vector3f p11 = localToPreSky(
+            new Vector3f(basis.forward()).mul(100.0F)
+                .add(new Vector3f(basis.right()).mul(halfSize))
+                .add(new Vector3f(basis.up()).mul(-halfSize)),
+            vanillaSkyAngle
+        );
+        Vector3f p01 = localToPreSky(
+            new Vector3f(basis.forward()).mul(100.0F)
+                .add(new Vector3f(basis.right()).mul(-halfSize))
+                .add(new Vector3f(basis.up()).mul(-halfSize)),
+            vanillaSkyAngle
+        );
+        return new QuadVertex[] {
+            new QuadVertex(p00.x, p00.y, p00.z, u0, v0, localUpFromPreSky(p00, vanillaSkyAngle)),
+            new QuadVertex(p10.x, p10.y, p10.z, u1, v0, localUpFromPreSky(p10, vanillaSkyAngle)),
+            new QuadVertex(p11.x, p11.y, p11.z, u1, v1, localUpFromPreSky(p11, vanillaSkyAngle)),
+            new QuadVertex(p01.x, p01.y, p01.z, u0, v1, localUpFromPreSky(p01, vanillaSkyAngle))
+        };
+    }
+
+    public static Vector3f lightInBillboardFrame(Direction lightWorldDir, BillboardBasis basis) {
+        Vector3f light = new Vector3f(
+            (float) lightWorldDir.east(), (float) lightWorldDir.up(), (float) lightWorldDir.south()
+        ).normalize();
+        // +X = quad right (u increases), +Y = quad down (v increases -> flip to match top-down UV or shader),
+        // Wait: in shader uv=(0,0) is top-left (+up, -right), uv=(1,1) is bottom-right (-up, +right).
+        // So quadPosition = uv * 2 - 1 has +X = right, +Y = -up, +Z = toward observer (-forward).
+        return new Vector3f(
+            light.dot(basis.right()),
+            -light.dot(basis.up()),
+            -light.dot(basis.forward())
+        ).normalize();
     }
 
     public static float localUpFromPreSky(Vector3f position, float vanillaSkyAngle) {
         double angle = vanillaSkyAngle * TWO_PI;
         double localUp = position.y * Math.cos(angle) - position.z * Math.sin(angle);
         return (float) (localUp / Math.max(position.length(), 0.0001F));
-    }
-
-    public static SkyMeshDirection skyMeshDirection(Direction direction, float vanillaSkyAngle) {
-        Vector3f position = toPreSkyCoordinates(direction, vanillaSkyAngle);
-        return new SkyMeshDirection(position.x, position.y, position.z);
     }
 
     public static float moonIllumination(double dayTime) {
@@ -94,7 +178,7 @@ public final class CelestialModel {
         }
 
         double longitude = solarLongitude(dayTime) + Math.PI + TWO_PI * cycle;
-        double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * daysSinceReference(dayTime));
+        double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * scaledYearDays(dayTime));
         double eclipticLatitude = Math.asin(
             Math.sin(LUNAR_INCLINATION) * Math.sin(longitude - nodeLongitude)
         );
@@ -127,7 +211,7 @@ public final class CelestialModel {
         double separation = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
         double longitude = solarLongitude(dayTime) + Math.PI + TWO_PI * lunarCycle(dayTime);
         double longitudeOffset = wrapRadians(longitude - solarLongitude(dayTime) - Math.PI);
-        double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * daysSinceReference(dayTime));
+        double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * scaledYearDays(dayTime));
         double eclipticLatitude = Math.asin(
             Math.sin(LUNAR_INCLINATION) * Math.sin(longitude - nodeLongitude)
         );
@@ -158,15 +242,100 @@ public final class CelestialModel {
         });
     }
 
-    private static Vector3f toPreSkyCoordinates(Direction direction, float vanillaSkyAngle) {
+    public static Planet[] planetEquatorialDirections(double dayTime) {
+        double days = scaledYearDays(dayTime) - REFERENCE_DAY_OF_YEAR;
+        double[] earthPosition = planetEclipticPosition(EARTH_ELEMENTS, days);
+        Planet[] planets = new Planet[8];
+        PlanetElements[] elements = PLANET_ELEMENTS;
+        for (int i = 0; i < elements.length; i++) {
+            PlanetElements planet = elements[i];
+            double[] heliocentric = planetEclipticPosition(planet, days);
+            double x = heliocentric[0] - earthPosition[0];
+            double y = heliocentric[1] - earthPosition[1];
+            double z = heliocentric[2] - earthPosition[2];
+            Equatorial geoEq = eclipticVectorToEquatorial(x, y, z);
+
+            double sunDist = Math.max(0.001, Math.sqrt(
+                heliocentric[0] * heliocentric[0]
+                    + heliocentric[1] * heliocentric[1]
+                    + heliocentric[2] * heliocentric[2]
+            ));
+            double earthDist = Math.max(0.001, Math.sqrt(x * x + y * y + z * z));
+            double cosPhase = (heliocentric[0] * x + heliocentric[1] * y + heliocentric[2] * z)
+                / (sunDist * earthDist);
+            double phaseAngleDeg = Math.toDegrees(Math.acos(Math.max(-1.0, Math.min(1.0, cosPhase))));
+            // Approximate apparent visual magnitude V = H + 5*log10(r*delta) + phase term
+            double phaseTerm = 0.015 * phaseAngleDeg + 0.00012 * phaseAngleDeg * phaseAngleDeg;
+            float apparentMagnitude = (float) (
+                planet.absoluteMagnitude + 5.0 * Math.log10(sunDist * earthDist) + phaseTerm
+            );
+            float intensity = Math.max(0.08F, Math.min(1.0F, (6.5F - apparentMagnitude) / 10.5F));
+
+            // Direction from planet to Sun in equatorial coordinates for realistic phase lighting
+            Equatorial sunFromPlanetEq = eclipticVectorToEquatorial(
+                -heliocentric[0], -heliocentric[1], -heliocentric[2]
+            );
+
+            planets[i] = new Planet(
+                planet.name,
+                geoEq.rightAscension,
+                geoEq.declination,
+                sunFromPlanetEq.rightAscension,
+                sunFromPlanetEq.declination,
+                planet.red,
+                planet.green,
+                planet.blue,
+                planet.size,
+                intensity,
+                apparentMagnitude
+            );
+        }
+        return planets;
+    }
+
+    public static PlanetDirection[] planetDirections(double dayTime, double latitude) {
+        Planet[] planets = planetEquatorialDirections(dayTime);
+        PlanetDirection[] directions = new PlanetDirection[planets.length - 1];
+        int index = 0;
+        for (Planet planet : planets) {
+            if (planet.name().equals("Earth")) {
+                continue;
+            }
+            Equatorial equatorial = new Equatorial(planet.rightAscension(), planet.declination());
+            Equatorial sunFromPlanet = new Equatorial(planet.sunRightAscension(), planet.sunDeclination());
+            directions[index++] = new PlanetDirection(
+                planet,
+                localDirection(equatorial, dayTime, latitude),
+                localDirection(sunFromPlanet, dayTime, latitude)
+            );
+        }
+        return directions;
+    }
+
+    private static Equatorial eclipticVectorToEquatorial(double x, double y, double z) {
+        double equatorialX = x;
+        double equatorialY = y * Math.cos(EARTH_OBLIQUITY) - z * Math.sin(EARTH_OBLIQUITY);
+        double equatorialZ = y * Math.sin(EARTH_OBLIQUITY) + z * Math.cos(EARTH_OBLIQUITY);
+        double rightAscension = Math.atan2(equatorialY, equatorialX);
+        if (rightAscension < 0.0) {
+            rightAscension += TWO_PI;
+        }
+        double declination = Math.atan2(
+            equatorialZ,
+            Math.sqrt(equatorialX * equatorialX + equatorialY * equatorialY)
+        );
+        return new Equatorial(rightAscension, declination);
+    }
+
+    private static Vector3f localToPreSky(Vector3f local, float vanillaSkyAngle) {
         double angle = vanillaSkyAngle * TWO_PI;
         double sine = Math.sin(angle);
         double cosine = Math.cos(angle);
         return new Vector3f(
-            (float) direction.south,
-            (float) (direction.up * cosine - direction.east * sine),
-            (float) (-direction.east * cosine - direction.up * sine)
-        ).normalize();
+            local.z,
+            (float) (local.y * cosine - local.x * sine),
+            (float) (-local.x * cosine - local.y * sine)
+        );
     }
 
     private static Direction localDirection(Equatorial equatorial, double dayTime, double latitude) {
@@ -195,8 +364,8 @@ public final class CelestialModel {
     }
 
     private static double solarLongitude(double dayTime) {
-        double daysFromEquinox = daysSinceReference(dayTime) - REFERENCE_DAY_OF_YEAR;
-        return TWO_PI * daysFromEquinox / DAYS_PER_YEAR;
+        double daysFromEquinox = (dayTime - REFERENCE_TICK) / 24_000.0;
+        return TWO_PI * daysFromEquinox / configuredDaysPerYear();
     }
 
     private static double lunarCycle(double dayTime) {
@@ -204,8 +373,51 @@ public final class CelestialModel {
         return cycle - Math.floor(cycle);
     }
 
-    private static double daysSinceReference(double dayTime) {
-        return REFERENCE_DAY_OF_YEAR + (dayTime - REFERENCE_TICK) / 24_000.0;
+    private static double scaledYearDays(double dayTime) {
+        double mcDays = (dayTime - REFERENCE_TICK) / 24_000.0;
+        return REFERENCE_DAY_OF_YEAR + mcDays * (DAYS_PER_YEAR / configuredDaysPerYear());
+    }
+
+    private static double[] planetEclipticPosition(PlanetElements planet, double days) {
+        double node = Math.toRadians(planet.node + planet.nodeRate * days);
+        double inclination = Math.toRadians(planet.inclination + planet.inclinationRate * days);
+        double perihelion = Math.toRadians(planet.perihelion + planet.perihelionRate * days);
+        double eccentricity = planet.eccentricity + planet.eccentricityRate * days;
+        double meanAnomaly = Math.toRadians(
+            wrapDegrees(planet.meanAnomaly + planet.meanMotion * days)
+        );
+
+        double eccentricAnomaly = meanAnomaly;
+        for (int iteration = 0; iteration < 8; iteration++) {
+            eccentricAnomaly -= (
+                eccentricAnomaly - eccentricity * Math.sin(eccentricAnomaly) - meanAnomaly
+            ) / (1.0 - eccentricity * Math.cos(eccentricAnomaly));
+        }
+
+        double xv = planet.semiMajorAxis
+            * (Math.cos(eccentricAnomaly) - eccentricity);
+        double yv = planet.semiMajorAxis
+            * Math.sqrt(1.0 - eccentricity * eccentricity)
+            * Math.sin(eccentricAnomaly);
+
+        double cosNode = Math.cos(node);
+        double sinNode = Math.sin(node);
+        double cosPerihelion = Math.cos(perihelion);
+        double sinPerihelion = Math.sin(perihelion);
+        double cosInclination = Math.cos(inclination);
+        double sinInclination = Math.sin(inclination);
+
+        double x = xv * (cosNode * cosPerihelion - sinNode * sinPerihelion * cosInclination)
+            - yv * (cosNode * sinPerihelion + sinNode * cosPerihelion * cosInclination);
+        double y = xv * (sinNode * cosPerihelion + cosNode * sinPerihelion * cosInclination)
+            - yv * (sinNode * sinPerihelion - cosNode * cosPerihelion * cosInclination);
+        double z = xv * (sinPerihelion * sinInclination)
+            + yv * (cosPerihelion * sinInclination);
+        return new double[] { x, y, z };
+    }
+
+    private static double wrapDegrees(double degrees) {
+        return degrees - Math.floor(degrees / 360.0) * 360.0;
     }
 
     private static double wrapRadians(double angle) {
@@ -248,13 +460,49 @@ public final class CelestialModel {
 
     public record Direction(double east, double up, double south) {}
 
+    public record BillboardBasis(Vector3f forward, Vector3f right, Vector3f up) {}
+
     public record LunarEclipse(
         float penumbra, float umbra, float shadowOffsetX, float shadowOffsetY
     ) {}
 
-    public record SkyMeshDirection(float x, float y, float z) {}
-
     public record QuadVertex(float x, float y, float z, float u, float v, float localUp) {}
 
+    public record Planet(
+        String name,
+        double rightAscension,
+        double declination,
+        double sunRightAscension,
+        double sunDeclination,
+        float red,
+        float green,
+        float blue,
+        float halfSize,
+        float intensity,
+        float apparentMagnitude
+    ) {}
+
+    public record PlanetDirection(Planet planet, Direction direction, Direction sunDirectionFromPlanet) {}
+
     private record Equatorial(double rightAscension, double declination) {}
+
+    private record PlanetElements(
+        String name,
+        double node,
+        double inclination,
+        double perihelion,
+        double semiMajorAxis,
+        double eccentricity,
+        double meanAnomaly,
+        double meanMotion,
+        double nodeRate,
+        double inclinationRate,
+        double perihelionRate,
+        double eccentricityRate,
+        float red,
+        float green,
+        float blue,
+        float size,
+        double absoluteMagnitude
+    ) {}
 }

@@ -1,11 +1,13 @@
 package dinner.dev.lumispheric.mixin;
 
-import dinner.dev.lumispheric.SkyRenderer;
 import com.mojang.blaze3d.systems.RenderSystem;
+import dinner.dev.lumispheric.SkyRenderer;
 import net.minecraft.client.Camera;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.FogRenderer;
 import net.minecraft.world.level.material.FogType;
+import net.minecraft.world.phys.Vec3;
+import org.joml.Vector3f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -31,8 +33,9 @@ abstract class FogRendererMixin {
             return;
         }
 
-        net.minecraft.world.phys.Vec3 color = SkyRenderer.horizonFogColor(
-            level, camera.getPosition().y
+        Vector3f look = camera.getLookVector();
+        Vec3 color = SkyRenderer.horizonFogColor(
+            level, camera.getPosition().y, new Vec3(look.x, look.y, look.z)
         );
         fogRed = (float) color.x;
         fogGreen = (float) color.y;

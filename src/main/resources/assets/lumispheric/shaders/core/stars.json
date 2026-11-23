@@ -23,6 +23,7 @@
     },
     { "name": "HorizonLevel", "type": "float", "count": 1, "values": [ 0.0 ] },
     { "name": "HorizonFadeWidth", "type": "float", "count": 1, "values": [ 0.01 ] },
-    { "name": "ColorModulator", "type": "float", "count": 4, "values": [ 1.0, 1.0, 1.0, 1.0 ] }
+    { "name": "ColorModulator", "type": "float", "count": 4, "values": [ 1.0, 1.0, 1.0, 1.0 ] },
+    { "name": "StarAtmosphere", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] }
   ]
 }
