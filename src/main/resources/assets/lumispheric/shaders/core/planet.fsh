@@ -12,10 +12,17 @@ uniform vec4 SkyParams2;
 uniform vec4 TwilightColor;
 // x = blueHour, y = auroraStrength, z = auroraHemisphere (+1 north / -1 south), w = pixelatedStyle
 uniform vec4 TwilightExtra;
-// x = startAzimuth, y = startElevation, z = azimuthDelta, w = elevationDelta
-uniform vec4 MeteorStart;
-// x = progress, y = active (0/1), z = gameTimeSeconds, w = cloudWindAngle
-uniform vec4 MeteorParams;
+// x = gameTimeSeconds, y = cloudWindAngle
+uniform vec4 TimeParams;
+// 4 simultaneous meteor slots: Start = (startAz, startEl, azDelta, elDelta), State = (progress, active, colorType, 0)
+uniform vec4 Meteor0Start;
+uniform vec4 Meteor0State;
+uniform vec4 Meteor1Start;
+uniform vec4 Meteor1State;
+uniform vec4 Meteor2Start;
+uniform vec4 Meteor2State;
+uniform vec4 Meteor3Start;
+uniform vec4 Meteor3State;
 // x = PlanetRadius, y = PlanetBlend, z = PlanetRotation.x, w = PlanetRotation.y
 uniform vec4 PlanetParams;
 uniform vec4 ColorModulator;
@@ -38,7 +45,7 @@ float hashCell(vec3 cell) {
 float valueNoise(vec3 position) {
     vec3 cell = floor(position);
     vec3 blend = fract(position);
-    // Quintic C2-continuous interpolation prevents grid-edge creases in lighting & relief!
+    // Quintic C2-continuous interpolation prevents grid-edge creases.
     blend = blend * blend * blend * (blend * (blend * 6.0 - 15.0) + 10.0);
 
     float z0 = mix(
@@ -108,16 +115,13 @@ float filteredNoise(vec3 coords) {
     return mix(0.5, valueNoise(coords), detailVisibility);
 }
 
-// Smooth orbital weather cloud field: swirling cyclone fronts, trade-wind belts, puffy cumulus & wispy cirrus.
-// Uses identical octaves when called for bump-map neighbors so there are ZERO crease or maze artifacts.
 vec2 orbitalCloudField(vec3 normal, bool includeFineWisps) {
     vec3 windAxis = normalize(vec3(0.12, 0.98, 0.14));
-    vec3 moved = rotateAroundAxis(normal, windAxis, MeteorParams.w);
+    vec3 moved = rotateAroundAxis(normal, windAxis, TimeParams.y);
 
     float lat = moved.y;
     vec3 stretched = vec3(moved.x, moved.y * 1.40, moved.z);
 
-    // Smooth macro cyclone / weather-front domain warp.
     vec3 macroP = stretched * 4.6 + vec3(11.3, 4.7, 19.1);
     float swirlA = valueNoise(macroP) - 0.5;
     float swirlB = valueNoise(macroP + vec3(23.1, 17.4, 9.2)) - 0.5;
@@ -138,7 +142,6 @@ vec2 orbitalCloudField(vec3 normal, bool includeFineWisps) {
         ? filteredNoise(warped * 8.8 + vec3(17.9, 53.2, 8.4))
         : 0.5;
 
-    // Balanced ~38% global cloud coverage with ITCZ tropical band & stormy mid-latitudes so oceans & continents shine.
     float beltBias = 0.03 * exp(-lat * lat * 18.0)
         + 0.045 * exp(-pow((abs(lat) - 0.60) / 0.24, 2.0))
         - 0.045 * exp(-pow((abs(lat) - 0.28) / 0.16, 2.0));
@@ -160,7 +163,6 @@ vec2 orbitalCloudField(vec3 normal, bool includeFineWisps) {
     return vec2(density, thickness);
 }
 
-// Smooth organic elevation function (C2 smooth FBM — NO sharp abs() contour creases!).
 float smoothMountainHeight(vec3 p) {
     float h1 = valueNoise(p * 14.0 + vec3(41.0, 13.0, 5.0));
     float h2 = valueNoise(p * 29.0 + vec3(7.0, 37.0, 17.0));
@@ -192,6 +194,28 @@ vec3 sphereNormalAt(vec3 direction, float cameraScale, float sphereScale) {
         direction.z * distanceToSurface
     );
     return normalize(surfacePosition);
+}
+
+// Fast screen-space normal perturbation for smooth orbital clouds (avoids 3 extra 3D-noise field evaluations per pixel).
+vec3 cloudScreenSpaceNormal(vec3 spherePos, float height, float strength) {
+    vec3 pDx = dFdx(spherePos);
+    vec3 pDy = dFdy(spherePos);
+    float hDx = dFdx(height);
+    float hDy = dFdy(height);
+    float xx = dot(pDx, pDx);
+    float xy = dot(pDx, pDy);
+    float yy = dot(pDy, pDy);
+    float det = xx * yy - xy * xy;
+    if (det <= 1.0e-14) {
+        return spherePos;
+    }
+    vec3 grad = (pDx * (yy * hDx - xy * hDy) + pDy * (xx * hDy - xy * hDx)) / det;
+    // Clamp gradient magnitude so distant grazing horizon pixels never spike.
+    float gradLen = length(grad);
+    if (gradLen > 24.0) {
+        grad *= 24.0 / gradLen;
+    }
+    return normalize(spherePos - grad * strength);
 }
 
 vec3 softFilmicRollOff(vec3 c) {
@@ -251,16 +275,23 @@ vec3 computeAurora(vec3 viewDir, float elevation, float auroraStrength, float he
     return auroraColor * polarMask * horizonClip * auroraStrength;
 }
 
-vec3 computeMeteor(float elevation, float azimuth) {
-    if (MeteorParams.y < 0.5) {
+vec3 evalSingleMeteor(float elevation, float azimuth, vec4 mStart, vec4 mState) {
+    if (mState.y < 0.5) {
         return vec3(0.0);
     }
-    float progress = MeteorParams.x;
-    float tail = max(0.0, progress - 0.28);
-    float headAz = MeteorStart.x + MeteorStart.z * progress;
-    float tailAz = MeteorStart.x + MeteorStart.z * tail;
-    float headEl = MeteorStart.y + MeteorStart.w * progress;
-    float tailEl = MeteorStart.y + MeteorStart.w * tail;
+    float progress = mState.x;
+    float tail = max(0.0, progress - 0.30);
+    float headAz = mStart.x + mStart.z * progress;
+    float tailAz = mStart.x + mStart.z * tail;
+    float headEl = mStart.y + mStart.w * progress;
+    float tailEl = mStart.y + mStart.w * tail;
+
+    // Fast bounding check avoids per-pixel sqrt/exp far from the meteor streak.
+    float minEl = min(headEl, tailEl) - 0.025;
+    float maxEl = max(headEl, tailEl) + 0.025;
+    if (elevation < minEl || elevation > maxEl) {
+        return vec3(0.0);
+    }
 
     float azScale = max(0.15, cos((headEl + tailEl) * 0.5));
     float dx = wrapRadians(azimuth - tailAz) * azScale;
@@ -269,21 +300,50 @@ vec3 computeMeteor(float elevation, float azimuth) {
     float vy = headEl - tailEl;
     float lenSq = vx * vx + vy * vy;
     float along = lenSq > 1.0e-7 ? clamp((dx * vx + dy * vy) / lenSq, 0.0, 1.0) : 0.0;
-    float dist = length(vec2(dx - along * vx, dy - along * vy));
+    float distSq = dot(vec2(dx - along * vx, dy - along * vy), vec2(dx - along * vx, dy - along * vy));
+    if (distSq > 0.0004) {
+        return vec3(0.0);
+    }
 
-    float width = mix(0.0020, 0.0052, along);
-    float core = exp(-(dist * dist) / (width * width));
-    float envelope = smoothstep(0.0, 0.12, progress) * (1.0 - smoothstep(0.75, 1.0, progress));
-    float trailProfile = pow(along, 1.65);
+    float width = mix(0.0019, 0.0052, along);
+    float core = exp(-distSq / (width * width));
+    float envelope = smoothstep(0.0, 0.12, progress) * (1.0 - smoothstep(0.74, 1.0, progress));
+    float trailProfile = pow(along, 1.6);
     float intensity = core * trailProfile * envelope;
     if (intensity <= 0.001) {
         return vec3(0.0);
     }
-    vec3 color = mix(vec3(0.65, 0.85, 1.0), vec3(1.0, 0.97, 0.88), smoothstep(0.5, 0.98, along));
-    return color * intensity * 1.25;
+
+    // Color by meteor origin: 0 = sporadic cool white, 1 = Perseids (cyan-emerald), 2 = Geminids (golden-amber).
+    vec3 wakeColor;
+    vec3 headColor;
+    if (mState.z > 1.5) {
+        wakeColor = vec3(1.00, 0.68, 0.28);
+        headColor = vec3(1.00, 0.96, 0.80);
+    } else if (mState.z > 0.5) {
+        wakeColor = vec3(0.42, 0.95, 0.86);
+        headColor = vec3(0.95, 1.00, 1.00);
+    } else {
+        wakeColor = vec3(0.65, 0.85, 1.00);
+        headColor = vec3(1.00, 0.97, 0.88);
+    }
+    return mix(wakeColor, headColor, smoothstep(0.5, 0.98, along)) * intensity * 1.32;
 }
 
-vec3 computeAtmosphere(vec3 viewDir, float elevation, float azimuth) {
+vec3 computeMeteors(vec3 viewDir, float elevation) {
+    if (Meteor0State.y + Meteor1State.y + Meteor2State.y + Meteor3State.y < 0.5) {
+        return vec3(0.0);
+    }
+    float azimuth = atan(viewDir.z, viewDir.x);
+    vec3 total = vec3(0.0);
+    if (Meteor0State.y > 0.5) total += evalSingleMeteor(elevation, azimuth, Meteor0Start, Meteor0State);
+    if (Meteor1State.y > 0.5) total += evalSingleMeteor(elevation, azimuth, Meteor1Start, Meteor1State);
+    if (Meteor2State.y > 0.5) total += evalSingleMeteor(elevation, azimuth, Meteor2Start, Meteor2State);
+    if (Meteor3State.y > 0.5) total += evalSingleMeteor(elevation, azimuth, Meteor3Start, Meteor3State);
+    return total;
+}
+
+vec3 computeAtmosphere(vec3 viewDir, float elevation) {
     float sunElevationSin = SkyParams0.x;
     float moonIllumination = SkyParams0.y;
     float rain = SkyParams0.z;
@@ -323,7 +383,6 @@ vec3 computeAtmosphere(vec3 viewDir, float elevation, float azimuth) {
     vec3 sky = mix(zenithDay, horizonDay, horizon);
 
     float sunDot = clamp(dot(viewDir, sunDir), -1.0, 1.0);
-    float moonDot = clamp(dot(viewDir, moonDir), -1.0, 1.0);
     float sunElev = asin(clamp(sunElevationSin, -1.0, 1.0));
     float apparentSunElev = sunElev + geometricDip;
 
@@ -333,152 +392,205 @@ vec3 computeAtmosphere(vec3 viewDir, float elevation, float azimuth) {
     float horizonNight = mix(nightBlend, 1.0 - smoothstep(-0.16, 0.22, sunDot), spaceBlend);
 
     float twilightLight = twilightStrength * (1.0 - rain * 0.75);
-    vec3 twilightZenith = mix(vec3(0.07, 0.14, 0.38), vec3(0.03, 0.055, 0.17), blueHour);
-    sky = mix(sky, twilightZenith, twilightLight * (1.0 - horizon) * (1.0 - spaceBlend) * 0.72);
+    if (twilightLight > 0.001) {
+        vec3 twilightZenith = mix(vec3(0.07, 0.14, 0.38), vec3(0.03, 0.055, 0.17), blueHour);
+        sky = mix(sky, twilightZenith, twilightLight * (1.0 - horizon) * (1.0 - spaceBlend) * 0.72);
+    }
 
     vec3 nightSky = mix(vec3(0.004, 0.007, 0.017), vec3(0.015, 0.024, 0.042), horizon);
     sky = mix(sky, nightSky, horizonNight);
 
-    float atmosphereHeight = max(0.0, skyElevation) / 0.045;
-    float upperAtmosphere = spaceBlend * exp(-atmosphereHeight * atmosphereHeight);
-    vec3 upperColor = mix(vec3(0.06, 0.17, 0.48), vec3(0.005, 0.008, 0.022), horizonNight);
-    sky = mix(sky, upperColor, upperAtmosphere * 0.85);
-
-    float moonAbove = smoothstep(-0.08, 0.14, moonDir.y);
-    float moonHalo = pow(max(moonDot, 0.0), 10.0) * 0.036 + pow(max(moonDot, 0.0), 48.0) * 0.045;
-    float moonAmbient = (0.004 + 0.006 * horizon) * moonAbove;
-    float lunarFactor = moonIllumination * horizonNight * (1.0 - rain * 0.85) * (1.0 - spaceBlend * 0.75);
-    sky += vec3(0.42, 0.62, 0.96) * (moonHalo * moonAbove + moonAmbient) * lunarFactor;
-
-    float sunAngle = acos(sunDot);
-    float rayleighPhase = 0.75 * (1.0 + sunDot * sunDot);
-    float rayleighScatter = (1.0 - horizonNight) * (1.0 - rain)
-        * rayleighPhase * (0.35 + 0.65 * horizon);
-    sky += vec3(0.012, 0.036, 0.090) * rayleighScatter;
-
-    float limbCenter = elevation + geometricDip - 0.028;
-    float blueLimbWidth = 0.032 + spaceBlend * 0.014;
-    float blueLimbDist = limbCenter / blueLimbWidth;
-    float blueLimb = exp(-blueLimbDist * blueLimbDist)
-        * spaceBlend * (1.0 - horizonNight * 0.65) * (1.0 - rain * 0.5)
-        * smoothstep(-0.18, 0.30, sunDot);
-    sky += vec3(0.04, 0.16, 0.42) * blueLimb;
-
-    float warmLimbWidth = 0.042 + spaceBlend * 0.02;
-    float warmLimbDist = (elevation + geometricDip - 0.006) / warmLimbWidth;
-    float warmLimb = exp(-warmLimbDist * warmLimbDist)
-        * spaceBlend * twilightStrength * smoothstep(0.50, 0.95, sunDot)
-        * (1.0 - rain * 0.5) * 0.95;
-    sky += vec3(0.24, 0.08, 0.025) * warmLimb;
-
-    // Multi-layered realistic sunset / sunrise spectral gradient.
-    float sunwardHorizon = exp(-(sunAngle * sunAngle) / 0.88);
-    float tighterSunward = exp(-(sunAngle * sunAngle) / 0.30);
-    float lowHorizonBand = exp(-abs(skyElevation) * mix(5.2, 13.0, spaceBlend));
-    float wideHorizonBand = exp(-abs(skyElevation) * mix(2.4, 9.0, spaceBlend));
-
-    float ozoneHeight = (skyElevation - 0.24) / 0.20;
-    float ozoneBand = exp(-ozoneHeight * ozoneHeight) * twilightLight * (1.0 - blueHour * 0.55)
-        * (1.0 - spaceBlend) * (0.45 + 0.55 * sunwardHorizon);
-    sky = mix(sky, vec3(0.18, 0.42, 0.64), ozoneBand * 0.34);
-
-    vec3 flankColor = mix(vec3(0.88, 0.46, 0.48), vec3(0.58, 0.32, 0.56), blueHour);
-    vec3 solarHorizonColor = mix(vec3(1.00, 0.54, 0.18), vec3(0.95, 0.30, 0.22), blueHour * 0.72);
-    vec3 horizonSweepColor = mix(flankColor, mix(twilightRgb, solarHorizonColor, 0.55), 0.22 + 0.78 * sunwardHorizon);
-    float horizonSweepWeight = wideHorizonBand * twilightLight * (0.48 + 0.52 * sunwardHorizon) * 0.84;
-    sky = mix(sky, horizonSweepColor, clamp(horizonSweepWeight, 0.0, 0.92));
-
-    vec3 blazingCoreColor = mix(vec3(1.05, 0.76, 0.32), vec3(1.02, 0.42, 0.16), blueHour * 0.85);
-    float blazingBand = lowHorizonBand * tighterSunward * twilightLight * 0.85;
-    sky = mix(sky, blazingCoreColor, clamp(blazingBand, 0.0, 0.90));
-
-    float roseHeight = (skyElevation - 0.11) / 0.18;
-    float roseBand = exp(-roseHeight * roseHeight) * wideHorizonBand * twilightLight
-        * (0.55 + 0.45 * (1.0 - sunwardHorizon)) * 0.44;
-    vec3 roseColor = mix(vec3(0.92, 0.46, 0.48), vec3(0.68, 0.34, 0.62), blueHour);
-    sky = mix(sky, roseColor, clamp(roseBand, 0.0, 0.75));
-
-    float antisolarDist = PI - sunAngle;
-    float antisolarMask = exp(-(antisolarDist * antisolarDist) / 0.62) * twilightLight * (1.0 - spaceBlend);
-    float shadowTop = clamp(0.025 + max(-apparentSunElev, 0.0) * 1.55, 0.025, 0.24);
-    float beltHeight = (skyElevation - (shadowTop + 0.068)) / 0.105;
-    float beltOfVenus = exp(-beltHeight * beltHeight) * antisolarMask * (0.55 + 0.45 * blueHour) * 0.54;
-    sky = mix(sky, vec3(0.82, 0.46, 0.58), clamp(beltOfVenus, 0.0, 0.75));
-
-    float earthShadow = (1.0 - smoothstep(shadowTop - 0.042, shadowTop + 0.042, skyElevation))
-        * smoothstep(-0.18, 0.01, skyElevation)
-        * antisolarMask * smoothstep(-0.03, 0.12, -apparentSunElev + 0.04) * 0.66;
-    sky = mix(sky, vec3(0.06, 0.09, 0.21), earthShadow);
-
-    float wideGlow = exp(-(sunAngle * sunAngle) / 0.32) * twilightLight;
-    float coreGlow = exp(-(sunAngle * sunAngle) / 0.065) * twilightLight;
-    sky += mix(vec3(0.42, 0.20, 0.06), vec3(0.32, 0.10, 0.08), blueHour) * wideGlow * 0.65;
-    sky += mix(vec3(0.58, 0.40, 0.16), vec3(0.42, 0.18, 0.08), blueHour) * coreGlow * 0.85;
-
-    float mieAsymmetry = mix(0.79, 0.73, biomeDust * 0.4);
-    float mieDenom = 1.0 + mieAsymmetry * mieAsymmetry - 2.0 * mieAsymmetry * sunDot;
-    float mieRatio = (1.0 - mieAsymmetry) * (1.0 - mieAsymmetry) / max(mieDenom, 1.0e-4);
-    float miePhase = mieRatio * sqrt(mieRatio);
-    float mieStrength = clamp(
-        miePhase * mieIntensity * (1.0 + biomeDust * 0.45) * (1.0 - horizonNight)
-            * (1.0 - rain * 0.75) * 0.18 * (0.35 + 0.65 * twilightStrength),
-        0.0,
-        0.88
-    );
-    vec3 mieColor = vec3(
-        1.04,
-        mix(0.95, twilightRgb.g + 0.24, twilightStrength),
-        mix(0.84, twilightRgb.b + 0.18, twilightStrength)
-    );
-    sky = mix(sky, mieColor, mieStrength);
-
-    float luminance = dot(sky, vec3(0.2126, 0.7152, 0.0722));
-    sky.r = mix(sky.r, luminance * 0.88, rain * 0.62);
-    sky.g = mix(sky.g, luminance * 0.94, rain * 0.48);
-    sky.b = mix(sky.b, min(1.0, luminance * 1.04 + 0.045), rain * 0.42);
-
-    sky += computeAurora(viewDir, elevation, auroraStrength, auroraHemisphere, MeteorParams.z, pixelatedStyle);
-    sky += computeMeteor(elevation, azimuth);
-
-    if (eclipse > 0.001) {
-        float eclipseDarkening = eclipse * 0.78;
-        sky *= 1.0 - eclipseDarkening;
-        float eclipseHorizon = exp(-abs(skyElevation) * 7.5) * eclipse * (1.0 - spaceBlend);
-        sky = mix(sky, vec3(0.65, 0.34, 0.16), eclipseHorizon * 0.52);
-        float coronaDist = (sunAngle - 0.085) / 0.055;
-        float corona = exp(-coronaDist * coronaDist) * eclipse;
-        float innerCorona = exp(-pow(max(sunAngle - 0.04, 0.0) / 0.032, 2.0)) * eclipse * 0.65;
-        sky = mix(sky, vec3(0.98, 0.86, 0.64), clamp(corona + innerCorona, 0.0, 0.92));
+    if (spaceBlend > 0.001) {
+        float atmosphereHeight = max(0.0, skyElevation) / 0.045;
+        float upperAtmosphere = spaceBlend * exp(-atmosphereHeight * atmosphereHeight);
+        vec3 upperColor = mix(vec3(0.06, 0.17, 0.48), vec3(0.005, 0.008, 0.022), horizonNight);
+        sky = mix(sky, upperColor, upperAtmosphere * 0.85);
     }
 
-    vec3 spaceColor = mix(vec3(0.002, 0.004, 0.012), vec3(0.001, 0.002, 0.006), horizonNight);
-    float apparentElev = elevation + horizonDip + horizonDrop * 0.5;
-    float spaceFacing = smoothstep(0.02, 0.14, abs(apparentElev));
-    sky = mix(sky, spaceColor, spaceBlend * spaceFacing);
+    float moonAbove = smoothstep(-0.08, 0.14, moonDir.y);
+    float lunarFactor = moonIllumination * horizonNight * (1.0 - rain * 0.85) * (1.0 - spaceBlend * 0.75);
+    if (lunarFactor > 0.001 && moonAbove > 0.001) {
+        float moonDot = max(dot(viewDir, moonDir), 0.0);
+        float moonHalo = pow(moonDot, 10.0) * 0.036 + pow(moonDot, 48.0) * 0.045;
+        float moonAmbient = (0.004 + 0.006 * horizon) * moonAbove;
+        sky += vec3(0.42, 0.62, 0.96) * (moonHalo * moonAbove + moonAmbient) * lunarFactor;
+    }
+
+    float dayFactor = (1.0 - horizonNight) * (1.0 - rain);
+    if (dayFactor > 0.001) {
+        float rayleighPhase = 0.75 * (1.0 + sunDot * sunDot);
+        float rayleighScatter = dayFactor * rayleighPhase * (0.35 + 0.65 * horizon);
+        sky += vec3(0.012, 0.036, 0.090) * rayleighScatter;
+    }
+
+    if (spaceBlend > 0.001) {
+        float limbCenter = elevation + geometricDip - 0.028;
+        float blueLimbWidth = 0.032 + spaceBlend * 0.014;
+        float blueLimbDist = limbCenter / blueLimbWidth;
+        float blueLimb = exp(-blueLimbDist * blueLimbDist)
+            * spaceBlend * (1.0 - horizonNight * 0.65) * (1.0 - rain * 0.5)
+            * smoothstep(-0.18, 0.30, sunDot);
+        sky += vec3(0.04, 0.16, 0.42) * blueLimb;
+
+        if (twilightStrength > 0.001) {
+            float warmLimbWidth = 0.042 + spaceBlend * 0.02;
+            float warmLimbDist = (elevation + geometricDip - 0.006) / warmLimbWidth;
+            float warmLimb = exp(-warmLimbDist * warmLimbDist)
+                * spaceBlend * twilightStrength * smoothstep(0.50, 0.95, sunDot)
+                * (1.0 - rain * 0.5) * 0.95;
+            sky += vec3(0.24, 0.08, 0.025) * warmLimb;
+        }
+    }
+
+    float sunAngle = 0.0;
+    if (twilightLight > 0.001 || eclipse > 0.001) {
+        sunAngle = acos(sunDot);
+    }
+
+    if (twilightLight > 0.001) {
+        float sunAngleSq = sunAngle * sunAngle;
+        float sunwardHorizon = exp(-sunAngleSq / 0.88);
+        float tighterSunward = exp(-sunAngleSq / 0.30);
+        float lowHorizonBand = exp(-abs(skyElevation) * mix(5.2, 13.0, spaceBlend));
+        float wideHorizonBand = exp(-abs(skyElevation) * mix(2.4, 9.0, spaceBlend));
+
+        float ozoneHeight = (skyElevation - 0.24) / 0.20;
+        float ozoneBand = exp(-ozoneHeight * ozoneHeight) * twilightLight * (1.0 - blueHour * 0.55)
+            * (1.0 - spaceBlend) * (0.45 + 0.55 * sunwardHorizon);
+        sky = mix(sky, vec3(0.18, 0.42, 0.64), ozoneBand * 0.34);
+
+        vec3 flankColor = mix(vec3(0.88, 0.46, 0.48), vec3(0.58, 0.32, 0.56), blueHour);
+        vec3 solarHorizonColor = mix(vec3(1.00, 0.54, 0.18), vec3(0.95, 0.30, 0.22), blueHour * 0.72);
+        vec3 horizonSweepColor = mix(flankColor, mix(twilightRgb, solarHorizonColor, 0.55), 0.22 + 0.78 * sunwardHorizon);
+        float horizonSweepWeight = wideHorizonBand * twilightLight * (0.48 + 0.52 * sunwardHorizon) * 0.84;
+        sky = mix(sky, horizonSweepColor, clamp(horizonSweepWeight, 0.0, 0.92));
+
+        vec3 blazingCoreColor = mix(vec3(1.05, 0.76, 0.32), vec3(1.02, 0.42, 0.16), blueHour * 0.85);
+        float blazingBand = lowHorizonBand * tighterSunward * twilightLight * 0.85;
+        sky = mix(sky, blazingCoreColor, clamp(blazingBand, 0.0, 0.90));
+
+        float roseHeight = (skyElevation - 0.11) / 0.18;
+        float roseBand = exp(-roseHeight * roseHeight) * wideHorizonBand * twilightLight
+            * (0.55 + 0.45 * (1.0 - sunwardHorizon)) * 0.44;
+        vec3 roseColor = mix(vec3(0.92, 0.46, 0.48), vec3(0.68, 0.34, 0.62), blueHour);
+        sky = mix(sky, roseColor, clamp(roseBand, 0.0, 0.75));
+
+        float antisolarDist = PI - sunAngle;
+        float antisolarMask = exp(-(antisolarDist * antisolarDist) / 0.62) * twilightLight * (1.0 - spaceBlend);
+        float shadowTop = clamp(0.025 + max(-apparentSunElev, 0.0) * 1.55, 0.025, 0.24);
+        float beltHeight = (skyElevation - (shadowTop + 0.068)) / 0.105;
+        float beltOfVenus = exp(-beltHeight * beltHeight) * antisolarMask * (0.55 + 0.45 * blueHour) * 0.54;
+        sky = mix(sky, vec3(0.82, 0.46, 0.58), clamp(beltOfVenus, 0.0, 0.75));
+
+        float earthShadow = (1.0 - smoothstep(shadowTop - 0.042, shadowTop + 0.042, skyElevation))
+            * smoothstep(-0.18, 0.01, skyElevation)
+            * antisolarMask * smoothstep(-0.03, 0.12, -apparentSunElev + 0.04) * 0.66;
+        sky = mix(sky, vec3(0.06, 0.09, 0.21), earthShadow);
+
+        float wideGlow = exp(-sunAngleSq / 0.32) * twilightLight;
+        float coreGlow = exp(-sunAngleSq / 0.065) * twilightLight;
+        sky += mix(vec3(0.42, 0.20, 0.06), vec3(0.32, 0.10, 0.08), blueHour) * wideGlow * 0.65;
+        sky += mix(vec3(0.58, 0.40, 0.16), vec3(0.42, 0.18, 0.08), blueHour) * coreGlow * 0.85;
+    }
+
+    if (mieIntensity > 0.001 && horizonNight < 0.995) {
+        float mieAsymmetry = mix(0.79, 0.73, biomeDust * 0.4);
+        float mieDenom = 1.0 + mieAsymmetry * mieAsymmetry - 2.0 * mieAsymmetry * sunDot;
+        float mieRatio = (1.0 - mieAsymmetry) * (1.0 - mieAsymmetry) / max(mieDenom, 1.0e-4);
+        float miePhase = mieRatio * sqrt(mieRatio);
+        float mieStrength = clamp(
+            miePhase * mieIntensity * (1.0 + biomeDust * 0.45) * (1.0 - horizonNight)
+                * (1.0 - rain * 0.75) * 0.18 * (0.35 + 0.65 * twilightStrength),
+            0.0,
+            0.88
+        );
+        vec3 mieColor = vec3(
+            1.04,
+            mix(0.95, twilightRgb.g + 0.24, twilightStrength),
+            mix(0.84, twilightRgb.b + 0.18, twilightStrength)
+        );
+        sky = mix(sky, mieColor, mieStrength);
+    }
+
+    if (rain > 0.001) {
+        float luminance = dot(sky, vec3(0.2126, 0.7152, 0.0722));
+        sky.r = mix(sky.r, luminance * 0.88, rain * 0.62);
+        sky.g = mix(sky.g, luminance * 0.94, rain * 0.48);
+        sky.b = mix(sky.b, min(1.0, luminance * 1.04 + 0.045), rain * 0.42);
+    }
+
+    sky += computeAurora(viewDir, elevation, auroraStrength, auroraHemisphere, TimeParams.x, pixelatedStyle);
+    sky += computeMeteors(viewDir, elevation);
+
+    if (eclipse > 0.001) {
+        float eclipseDarkening = eclipse * 0.85;
+        sky *= 1.0 - eclipseDarkening;
+        float eclipseHorizon = exp(-abs(skyElevation) * 7.2) * eclipse * (1.0 - spaceBlend);
+        sky = mix(sky, vec3(0.68, 0.34, 0.16), eclipseHorizon * 0.56);
+
+        // Only evaluate solar corona trigonometry within ~16 degrees of the eclipsed Sun (~3% of sky).
+        if (sunAngle < 0.28) {
+            vec3 sunRef = abs(sunDir.y) > 0.95 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+            vec3 sunRight = normalize(cross(sunRef, sunDir));
+            vec3 sunUpVec = normalize(cross(sunDir, sunRight));
+            float coronaAngle = atan(dot(viewDir, sunUpVec), dot(viewDir, sunRight));
+            float streamerWave = 0.72 + 0.28 * cos(coronaAngle * 2.0 + 0.45)
+                + 0.14 * sin(coronaAngle * 5.0 - 0.8);
+            float radialSpan = 0.055 * streamerWave;
+            float coronaDist = max(sunAngle - 0.032, 0.0) / radialSpan;
+            float outerCorona = exp(-coronaDist * coronaDist * 0.85) * eclipse * (0.65 + 0.35 * spaceBlend);
+            float innerCorona = exp(-pow(max(sunAngle - 0.028, 0.0) / 0.024, 2.0)) * eclipse * 0.92;
+            vec3 coronaCol = mix(vec3(0.96, 0.90, 0.78), vec3(0.95, 0.97, 1.00), spaceBlend * 0.75 + 0.25);
+            sky += coronaCol * clamp(outerCorona * 0.72 + innerCorona, 0.0, 1.15);
+        }
+    }
+
+    if (spaceBlend > 0.001) {
+        vec3 spaceColor = mix(vec3(0.002, 0.004, 0.012), vec3(0.001, 0.002, 0.006), horizonNight);
+        float apparentElev = elevation + horizonDip + horizonDrop * 0.5;
+        float spaceFacing = smoothstep(0.02, 0.14, abs(apparentElev));
+        sky = mix(sky, spaceColor, spaceBlend * spaceFacing);
+    }
 
     return clamp(softFilmicRollOff(sky), 0.0, 1.0);
+}
+
+// Computes the Moon's cylindrical umbra/penumbra shadow cast onto the planet surface, clouds,
+// and orbital atmosphere during a solar eclipse. Returns vec2(shadowDarkening, warmPenumbraRing).
+vec2 orbitalEclipseShadow(vec3 normal, vec3 sunDir, vec3 moonDir, float eclipse) {
+    if (eclipse <= 0.001) {
+        return vec2(0.0);
+    }
+    vec3 shadowCenter = normalize(vec3(0.0, 1.0, 0.0) + (moonDir - sunDir) * 3.5);
+    vec3 offset = normal - shadowCenter;
+    vec3 perp = offset - sunDir * dot(offset, sunDir);
+    float dist = length(perp);
+    float umbra = (1.0 - smoothstep(0.032, 0.118, dist)) * eclipse;
+    float penumbra = (1.0 - smoothstep(0.055, 0.345, dist)) * eclipse;
+    float shadow = clamp(umbra * 0.90 + penumbra * 0.42, 0.0, 0.92);
+    float warmRing = smoothstep(0.025, 0.115, dist) * (1.0 - smoothstep(0.115, 0.275, dist)) * eclipse;
+    return vec2(shadow, warmRing);
 }
 
 void main() {
     vec3 viewDirection = normalize(localPosition);
     float elevation = asin(clamp(viewDirection.y, -1.0, 1.0));
-    float azimuth = atan(viewDirection.z, viewDirection.x);
-    vec3 skyRgb = computeAtmosphere(viewDirection, elevation, azimuth);
-    vec4 skyColor = vec4(skyRgb, 1.0) * vertexColor * ColorModulator;
 
     float planetBlend = PlanetParams.y;
-    if (planetBlend <= 0.001) {
-        fragColor = skyColor;
-        return;
-    }
-
     float horizon = -SkyParams1.y;
-    float coverage = planetBlend * (1.0 - smoothstep(
-        horizon - 0.012, horizon + PLANET_HORIZON_TOP_FADE, elevation
-    ));
-    if (coverage <= 0.001) {
-        fragColor = skyColor;
-        return;
+    float coverage = planetBlend <= 0.001
+        ? 0.0
+        : planetBlend * (1.0 - smoothstep(horizon - 0.012, horizon + PLANET_HORIZON_TOP_FADE, elevation));
+
+    // Skip computing atmosphere completely on opaque orbital planet pixels (saves ~30% GPU time in orbit).
+    vec4 skyColor = vec4(0.0, 0.0, 0.0, 1.0);
+    if (coverage < 0.999) {
+        vec3 skyRgb = computeAtmosphere(viewDirection, elevation);
+        skyColor = vec4(skyRgb, 1.0) * vertexColor * ColorModulator;
+        if (coverage <= 0.001) {
+            fragColor = skyColor;
+            return;
+        }
     }
 
     float planetRadius = PlanetParams.x;
@@ -488,8 +600,6 @@ void main() {
     float cameraScale = 1.0 + cameraHeight / planetRadius;
     vec3 worldSurfaceNormal = sphereNormalAt(viewDirection, cameraScale, 1.0);
     vec3 smoothSurfaceNormal = toPlanetCoordinates(worldSurfaceNormal);
-    // In Minecraft (Pixel) style, sample clean crisp pixel texels (NO fwidth/dFdx so zero noisy seams!).
-    // In Realistic (Smooth) style, use silky continuous coordinates + mountain relief + KSP cyclones + city lights.
     vec3 surfaceNormal = isPixelStyle
         ? quantizeCubeSphere(smoothSurfaceNormal, 140.0)
         : smoothSurfaceNormal;
@@ -497,7 +607,6 @@ void main() {
     vec3 sunDirection = normalize(SunDirection);
     vec3 moonDirection = normalize(MoonDirection);
 
-    // Continents, archipelagos & coastlines (pure C2 smooth noise -> zero maze/contour artifacts!).
     float continentalWarp = valueNoise(surfaceNormal * 2.5 + vec3(17.0, 41.0, 9.0)) - 0.5;
     float regionalWarp = valueNoise(surfaceNormal * 5.6 + vec3(7.0, 23.0, 37.0)) - 0.5;
     float fineWarp = valueNoise(surfaceNormal * 12.0 + vec3(31.0, 5.0, 19.0)) - 0.5;
@@ -529,109 +638,122 @@ void main() {
     float coast = smoothstep(0.35, 0.45, continentNoise)
         * (1.0 - smoothstep(0.47, 0.52, continentNoise));
 
-    float moisture = 0.62 * valueNoise(surfaceNormal * 6.8 + vec3(19.0, 7.0, 29.0))
-        + 0.38 * valueNoise(surfaceNormal * 15.5 + vec3(3.0, 23.0, 11.0));
-    float climateNoise = valueNoise(surfaceNormal * 5.2 + vec3(31.0, 17.0, 9.0));
-    float temperature = clamp(
-        1.0 - abs(surfaceNormal.y) * 0.84 + (climateNoise - 0.5) * 0.24,
-        0.0,
-        1.0
-    );
-
-    // Organic smooth mountain ranges (strictly confined to continental interiors; zero sharp abs() maze lines!).
-    float mountainField = smoothMountainHeight(surfaceNormal);
-    float inlandMask = smoothstep(0.54, 0.70, continentalMass);
-    float highland = inlandMask * smoothstep(0.56, 0.78, mountainField);
-
-    // Subtle organic surface detail (anti-aliased in smooth mode, crisp macro variation in pixel mode).
-    float fineSurfaceDetail = isPixelStyle
-        ? (0.65 * valueNoise(surfaceNormal * 42.0 + vec3(11.0, 23.0, 7.0))
-            + 0.35 * valueNoise(surfaceNormal * 84.0 + vec3(3.0, 17.0, 29.0)))
-        : (0.45 * filteredNoise(surfaceNormal * 65.0 + vec3(11.0, 23.0, 7.0))
-            + 0.35 * filteredNoise(surfaceNormal * 150.0 + vec3(3.0, 17.0, 29.0))
-            + 0.20 * filteredNoise(surfaceNormal * 320.0 + vec3(19.0, 7.0, 37.0)));
-
-    // Gentle analytic finite-difference relief ONLY on mountains in Smooth mode (completely flat on plains & oceans!).
     float sunDot = dot(worldSurfaceNormal, sunDirection);
-    float daylight = smoothstep(-0.06, 0.06, sunDot);
-    float directLight = max(sunDot, 0.0);
-    if (!isPixelStyle && land > 0.05 && highland > 0.02 && daylight > 0.01) {
-        vec3 tX = normalize(cross(
-            worldSurfaceNormal,
-            abs(worldSurfaceNormal.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)
-        ));
-        vec3 tY = normalize(cross(worldSurfaceNormal, tX));
-        float stepSize = 0.0022;
-        float hX = smoothMountainHeight(toPlanetCoordinates(normalize(worldSurfaceNormal + tX * stepSize)));
-        float hY = smoothMountainHeight(toPlanetCoordinates(normalize(worldSurfaceNormal + tY * stepSize)));
-        vec3 mountainNormal = normalize(
-            worldSurfaceNormal
-                - tX * (hX - mountainField) * highland * 3.2
-                - tY * (hY - mountainField) * highland * 3.2
+    float rawDaylight = smoothstep(-0.06, 0.06, sunDot);
+    float eclipseStrength = SkyParams0.w;
+    vec2 surfaceEclipse = orbitalEclipseShadow(worldSurfaceNormal, sunDirection, moonDirection, eclipseStrength);
+    float surfaceEclipseShadow = surfaceEclipse.x * rawDaylight;
+    float surfaceEclipseWarm = surfaceEclipse.y * rawDaylight;
+    float daylight = rawDaylight * (1.0 - surfaceEclipseShadow * 0.88);
+    float directLight = max(sunDot, 0.0) * (1.0 - surfaceEclipseShadow);
+
+    // Skip expensive fine surface noise on deep night-side pixels where surface albedo is nearly dark.
+    float fineSurfaceDetail = 0.5;
+    if (daylight > 0.002) {
+        fineSurfaceDetail = isPixelStyle
+            ? (0.65 * valueNoise(surfaceNormal * 42.0 + vec3(11.0, 23.0, 7.0))
+                + 0.35 * valueNoise(surfaceNormal * 84.0 + vec3(3.0, 17.0, 29.0)))
+            : (0.45 * filteredNoise(surfaceNormal * 65.0 + vec3(11.0, 23.0, 7.0))
+                + 0.35 * filteredNoise(surfaceNormal * 150.0 + vec3(3.0, 17.0, 29.0))
+                + 0.20 * filteredNoise(surfaceNormal * 320.0 + vec3(19.0, 7.0, 37.0)));
+    }
+    float temperature = 0.5;
+    float highland = 0.0;
+
+    vec3 landColor = vec3(0.0);
+    // Skip biome, climate, and mountain noise completely on pure ocean pixels!
+    if (land > 0.005) {
+        float moisture = 0.62 * valueNoise(surfaceNormal * 6.8 + vec3(19.0, 7.0, 29.0))
+            + 0.38 * valueNoise(surfaceNormal * 15.5 + vec3(3.0, 23.0, 11.0));
+        float climateNoise = valueNoise(surfaceNormal * 5.2 + vec3(31.0, 17.0, 9.0));
+        temperature = clamp(
+            1.0 - abs(surfaceNormal.y) * 0.84 + (climateNoise - 0.5) * 0.24,
+            0.0,
+            1.0
         );
-        directLight = mix(directLight, max(dot(mountainNormal, sunDirection), 0.0), land * highland);
+
+        float mountainField = smoothMountainHeight(surfaceNormal);
+        float inlandMask = smoothstep(0.54, 0.70, continentalMass);
+        highland = inlandMask * smoothstep(0.56, 0.78, mountainField);
+
+        if (!isPixelStyle && highland > 0.02 && daylight > 0.01) {
+            vec3 tX = normalize(cross(
+                worldSurfaceNormal,
+                abs(worldSurfaceNormal.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)
+            ));
+            vec3 tY = normalize(cross(worldSurfaceNormal, tX));
+            float stepSize = 0.0022;
+            float hX = smoothMountainHeight(toPlanetCoordinates(normalize(worldSurfaceNormal + tX * stepSize)));
+            float hY = smoothMountainHeight(toPlanetCoordinates(normalize(worldSurfaceNormal + tY * stepSize)));
+            vec3 mountainNormal = normalize(
+                worldSurfaceNormal
+                    - tX * (hX - mountainField) * highland * 3.2
+                    - tY * (hY - mountainField) * highland * 3.2
+            );
+            directLight = mix(directLight, max(dot(mountainNormal, sunDirection), 0.0), land * highland);
+        }
+
+        vec3 nightLand = vec3(0.010, 0.018, 0.018);
+        vec3 grassland = isPixelStyle ? vec3(0.28, 0.50, 0.18) : vec3(0.19, 0.32, 0.14);
+        vec3 forest = isPixelStyle ? vec3(0.12, 0.34, 0.13) : vec3(0.08, 0.21, 0.10);
+        vec3 tropicalForest = isPixelStyle ? vec3(0.10, 0.42, 0.14) : vec3(0.07, 0.27, 0.12);
+        vec3 savanna = isPixelStyle ? vec3(0.48, 0.44, 0.20) : vec3(0.38, 0.33, 0.16);
+        vec3 desert = isPixelStyle ? vec3(0.76, 0.68, 0.42) : vec3(0.56, 0.44, 0.26);
+        vec3 badlands = isPixelStyle ? vec3(0.72, 0.34, 0.18) : vec3(0.52, 0.28, 0.16);
+        vec3 rockMountain = vec3(0.36, 0.34, 0.32);
+        vec3 tundra = vec3(0.30, 0.36, 0.33);
+        vec3 snow = vec3(0.84, 0.89, 0.93);
+
+        vec3 warmBiome = mix(savanna, tropicalForest, smoothstep(0.36, 0.68, moisture));
+        vec3 temperateBiome = mix(grassland, forest, smoothstep(0.40, 0.70, moisture));
+        vec3 dayLand = mix(tundra, temperateBiome, smoothstep(0.12, 0.34, temperature));
+        dayLand = mix(dayLand, warmBiome, smoothstep(0.48, 0.76, temperature));
+        float desertCoverage = smoothstep(0.48, 0.76, temperature) * (1.0 - smoothstep(0.20, 0.46, moisture));
+        vec3 aridBiome = mix(desert, badlands, smoothstep(0.55, 0.80, regionalNoise) * 0.40);
+        dayLand = mix(dayLand, aridBiome, desertCoverage);
+        dayLand = mix(dayLand, rockMountain, highland * 0.55);
+        float snowCoverage = max(
+            1.0 - smoothstep(0.06, 0.19, temperature),
+            highland * (1.0 - smoothstep(0.30, 0.56, temperature)) * smoothstep(0.58, 0.80, mountainField)
+        );
+        dayLand = mix(dayLand, snow, clamp(snowCoverage, 0.0, 1.0));
+        dayLand *= 0.84 + 0.32 * regionalNoise;
+        landColor = mix(nightLand, dayLand, daylight) * (0.76 + fineSurfaceDetail * 0.42);
+    }
+
+    vec3 surfaceColor;
+    if (land >= 0.995) {
+        surfaceColor = landColor;
+    } else {
+        vec3 deepOcean = mix(vec3(0.003, 0.010, 0.028), vec3(0.012, 0.072, 0.23), daylight);
+        vec3 coastalOcean = mix(vec3(0.006, 0.024, 0.048), vec3(0.028, 0.18, 0.34), daylight);
+        vec3 shallowOcean = mix(vec3(0.010, 0.040, 0.055), vec3(0.07, 0.36, 0.40), daylight);
+        float shelf = smoothstep(0.32, 0.46, continentNoise);
+        float shallows = smoothstep(0.41, 0.485, continentNoise) * (1.0 - land);
+        vec3 ocean = mix(deepOcean, coastalOcean, max(coast * 0.78, shelf * 0.58));
+        ocean = mix(ocean, shallowOcean, shallows * 0.85);
+        ocean *= 0.94 + fineSurfaceDetail * 0.12;
+        surfaceColor = mix(ocean, landColor, land);
+    }
+
+    vec3 sunlightColor = solarTransmission(sunDot);
+    if (land < 0.99 && daylight > 0.01) {
+        vec3 waterHalfVector = normalize(sunDirection - viewDirection);
+        float nh = max(dot(worldSurfaceNormal, waterHalfVector), 0.0);
+        float broadGlint = pow(nh, 22.0) * 0.15;
+        float sharpGlint = pow(nh, 120.0) * (isPixelStyle ? 0.25 : 0.55);
+        float oceanGlint = (broadGlint + sharpGlint) * daylight * (1.0 - land);
+        surfaceColor += mix(vec3(0.76, 0.88, 1.0), vec3(1.0, 0.78, 0.52), 1.0 - sunlightColor.b) * oceanGlint;
     }
 
     float moonNight = 1.0 - smoothstep(-0.08, 0.16, SkyParams0.x);
     float moonLight = SkyParams0.y * moonNight * max(dot(worldSurfaceNormal, moonDirection), 0.0);
-
-    // Rich sapphire oceans with glowing turquoise shelves.
-    vec3 deepOcean = mix(vec3(0.003, 0.010, 0.028), vec3(0.012, 0.072, 0.23), daylight);
-    vec3 coastalOcean = mix(vec3(0.006, 0.024, 0.048), vec3(0.028, 0.18, 0.34), daylight);
-    vec3 shallowOcean = mix(vec3(0.010, 0.040, 0.055), vec3(0.07, 0.36, 0.40), daylight);
-    float shelf = smoothstep(0.32, 0.46, continentNoise);
-    float shallows = smoothstep(0.41, 0.485, continentNoise) * (1.0 - land);
-    vec3 ocean = mix(deepOcean, coastalOcean, max(coast * 0.78, shelf * 0.58));
-    ocean = mix(ocean, shallowOcean, shallows * 0.85);
-    ocean *= 0.94 + fineSurfaceDetail * 0.12;
-
-    // Distinct Minecraft biome colors in Pixel mode vs realistic Earth/Kerbin colors in Smooth mode!
-    vec3 nightLand = vec3(0.010, 0.018, 0.018);
-    vec3 grassland = isPixelStyle ? vec3(0.28, 0.50, 0.18) : vec3(0.19, 0.32, 0.14);
-    vec3 forest = isPixelStyle ? vec3(0.12, 0.34, 0.13) : vec3(0.08, 0.21, 0.10);
-    vec3 tropicalForest = isPixelStyle ? vec3(0.10, 0.42, 0.14) : vec3(0.07, 0.27, 0.12);
-    vec3 savanna = isPixelStyle ? vec3(0.48, 0.44, 0.20) : vec3(0.38, 0.33, 0.16);
-    vec3 desert = isPixelStyle ? vec3(0.76, 0.68, 0.42) : vec3(0.56, 0.44, 0.26);
-    vec3 badlands = isPixelStyle ? vec3(0.72, 0.34, 0.18) : vec3(0.52, 0.28, 0.16);
-    vec3 rockMountain = vec3(0.36, 0.34, 0.32);
-    vec3 tundra = vec3(0.30, 0.36, 0.33);
-    vec3 snow = vec3(0.84, 0.89, 0.93);
-
-    vec3 warmBiome = mix(savanna, tropicalForest, smoothstep(0.36, 0.68, moisture));
-    vec3 temperateBiome = mix(grassland, forest, smoothstep(0.40, 0.70, moisture));
-    vec3 dayLand = mix(tundra, temperateBiome, smoothstep(0.12, 0.34, temperature));
-    dayLand = mix(dayLand, warmBiome, smoothstep(0.48, 0.76, temperature));
-    float desertCoverage = smoothstep(0.48, 0.76, temperature) * (1.0 - smoothstep(0.20, 0.46, moisture));
-    vec3 aridBiome = mix(desert, badlands, smoothstep(0.55, 0.80, regionalNoise) * 0.40);
-    dayLand = mix(dayLand, aridBiome, desertCoverage);
-    dayLand = mix(dayLand, rockMountain, highland * 0.55);
-    float snowCoverage = max(
-        1.0 - smoothstep(0.06, 0.19, temperature),
-        highland * (1.0 - smoothstep(0.30, 0.56, temperature)) * smoothstep(0.58, 0.80, mountainField)
-    );
-    dayLand = mix(dayLand, snow, clamp(snowCoverage, 0.0, 1.0));
-    dayLand *= 0.84 + 0.32 * regionalNoise;
-    vec3 landColor = mix(nightLand, dayLand, daylight);
-    landColor *= 0.76 + fineSurfaceDetail * 0.42;
-
-    vec3 surfaceColor = mix(ocean, landColor, land);
-
-    // Sparkling orbital ocean sun-glint.
-    vec3 waterHalfVector = normalize(sunDirection - viewDirection);
-    float nh = max(dot(worldSurfaceNormal, waterHalfVector), 0.0);
-    float broadGlint = pow(nh, 22.0) * 0.15;
-    float sharpGlint = pow(nh, 120.0) * (isPixelStyle ? 0.25 : 0.55);
-    float oceanGlint = (broadGlint + sharpGlint) * daylight * (1.0 - land);
-    vec3 sunlightColor = solarTransmission(sunDot);
-    surfaceColor += mix(vec3(0.76, 0.88, 1.0), vec3(1.0, 0.78, 0.52), 1.0 - sunlightColor.b) * oceanGlint;
-
     surfaceColor *= 0.025 + directLight * 0.975;
     surfaceColor *= mix(vec3(1.0), sunlightColor, directLight * 0.85);
     float terminatorTwilight = twilightScattering(sunDot);
-    surfaceColor *= mix(vec3(1.0), vec3(1.14, 0.78, 0.56), terminatorTwilight * 0.48);
+    surfaceColor *= mix(vec3(1.0), vec3(1.14, 0.78, 0.56), clamp(terminatorTwilight * 0.48 + surfaceEclipseWarm * 0.42, 0.0, 0.65));
     surfaceColor += vec3(0.018, 0.028, 0.055) * moonLight * 0.85;
 
-    // Cloud shadow projection onto land & ocean below.
     const float CLOUD_SURFACE_HEIGHT = 4800.0;
     float cloudSurfaceRadius = 1.0 + CLOUD_SURFACE_HEIGHT / planetRadius;
     float cloudRayProjection = cameraScale * viewDirection.y;
@@ -654,8 +776,8 @@ void main() {
         surfaceColor *= 1.0 - shadowCloud.x * daylight * 0.48;
     }
 
-    // Clustered coastal/temperate city lights on the night side (Realistic mode only).
-    if (!isPixelStyle) {
+    // Night city lights only in Realistic mode on dark land pixels.
+    if (!isPixelStyle && land > 0.02 && daylight < 0.98) {
         float urbanCluster = smoothstep(0.56, 0.84, valueNoise(smoothSurfaceNormal * 28.0 + vec3(9.0, 31.0, 17.0)));
         float habitable = smoothstep(0.18, 0.42, temperature) * (1.0 - smoothstep(0.75, 0.92, temperature))
             * (1.0 - highland * 0.8);
@@ -675,11 +797,9 @@ void main() {
     float altitudeHaze = smoothstep(1024.0, 9000.0, cameraHeight);
     float lowAtmosphereVeil = mix(0.10, 0.24, altitudeHaze);
     vec3 hazeColor = mix(vec3(0.010, 0.022, 0.048), vec3(0.30, 0.52, 0.78), daylight);
-    hazeColor = mix(hazeColor, vec3(0.96, 0.46, 0.26), terminatorTwilight * 0.60);
+    hazeColor = mix(hazeColor, vec3(0.96, 0.46, 0.26), clamp(terminatorTwilight * 0.60 + surfaceEclipseWarm * 0.55, 0.0, 0.80));
     surfaceColor = mix(surfaceColor, hazeColor, lowAtmosphereVeil * mix(0.12, 1.0, daylight));
 
-    // Crisp orbital cloud deck: smooth swirling KSP-EVE clouds in Realistic mode,
-    // crisp blocky Minecraft-like cloud deck in Pixel mode (zero bump artifacts!).
     float cloudDiscriminant = cloudRayProjection * cloudRayProjection
         - (cameraScale * cameraScale - cloudSurfaceRadius * cloudSurfaceRadius);
     if (cloudDiscriminant >= 0.0) {
@@ -701,9 +821,18 @@ void main() {
                 : cloudSample.x;
             float cloudThickness = cloudSample.y;
 
+            // Compute fast screen-space cloud bump before conditional branch so derivatives stay quad-coherent!
+            vec3 cloudDetailNormal = isPixelStyle
+                ? cloudNormal
+                : cloudScreenSpaceNormal(cloudNormal, cloudSample.x, 0.0085);
+
             if (cloudDensity > 0.004) {
                 float sampleSunDot = dot(cloudNormal, sunDirection);
-                float sampleDaylight = smoothstep(-0.02, 0.08, sampleSunDot);
+                float sampleRawDaylight = smoothstep(-0.02, 0.08, sampleSunDot);
+                vec2 cloudEclipse = orbitalEclipseShadow(cloudNormal, sunDirection, moonDirection, eclipseStrength);
+                float cloudEclipseShadow = cloudEclipse.x * sampleRawDaylight;
+                float cloudEclipseWarm = cloudEclipse.y * sampleRawDaylight;
+                float sampleDaylight = sampleRawDaylight * (1.0 - cloudEclipseShadow * 0.90);
                 float sampleMoonLight = SkyParams0.y * moonNight
                     * max(dot(cloudNormal, moonDirection), 0.0);
 
@@ -712,31 +841,16 @@ void main() {
                 vec3 sampleCloudColor = mix(cloudNightColor, cloudLitColor, sampleDaylight);
                 sampleCloudColor *= mix(vec3(1.0), solarTransmission(sampleSunDot), sampleDaylight * 0.78);
                 float cloudTwilight = twilightScattering(sampleSunDot);
-                sampleCloudColor = mix(sampleCloudColor, vec3(1.08, 0.46, 0.24), cloudTwilight * 0.68);
+                sampleCloudColor = mix(
+                    sampleCloudColor,
+                    vec3(1.08, 0.46, 0.24),
+                    clamp(cloudTwilight * 0.68 + cloudEclipseWarm * 0.55, 0.0, 0.80)
+                );
 
                 float diffuseLight = 0.55 + max(sampleSunDot, 0.0) * 0.50;
                 float cloudSelfShadow = 1.0;
 
-                // Clean matched-detail finite-difference shading ONLY in Realistic (Smooth) mode!
-                if (!isPixelStyle) {
-                    vec3 tangentX = normalize(cross(
-                        cloudNormal,
-                        abs(cloudNormal.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)
-                    ));
-                    vec3 tangentY = normalize(cross(cloudNormal, tangentX));
-                    float bumpStep = 0.0022;
-                    float baseBump = orbitalCloudField(smoothCloudPlanet, false).x;
-                    float densityX = orbitalCloudField(
-                        toPlanetCoordinates(normalize(cloudNormal + tangentX * bumpStep)), false
-                    ).x;
-                    float densityY = orbitalCloudField(
-                        toPlanetCoordinates(normalize(cloudNormal + tangentY * bumpStep)), false
-                    ).x;
-                    vec3 cloudDetailNormal = normalize(
-                        cloudNormal
-                            - tangentX * (densityX - baseBump) * 2.8
-                            - tangentY * (densityY - baseBump) * 2.8
-                    );
+                if (!isPixelStyle && sampleDaylight > 0.01) {
                     float normalSunDot = max(dot(cloudDetailNormal, sunDirection), 0.0);
                     diffuseLight = 0.48 + normalSunDot * 0.58;
 
@@ -748,7 +862,7 @@ void main() {
                             cloudNormal + sunTangent * (0.010 / sunTangentLength)
                         );
                         float sunwardDensity = orbitalCloudField(toPlanetCoordinates(sunwardNormal), false).x;
-                        sunwardShadow = smoothstep(0.03, 0.22, sunwardDensity - baseBump);
+                        sunwardShadow = smoothstep(0.03, 0.22, sunwardDensity - cloudSample.x);
                     }
                     cloudSelfShadow = 1.0 - sampleDaylight * (cloudThickness * 0.06 + sunwardShadow * 0.18);
                 }
@@ -767,14 +881,13 @@ void main() {
         }
     }
 
-    // KSP Scatterer-style crisp atmospheric Fresnel scattering & blazing blue/amber planetary limb!
     float viewCosine = clamp(dot(worldSurfaceNormal, -viewDirection), 0.0, 1.0);
     float airDensity = exp(-cameraHeight / 10000.0);
     float atmosphericOpacity = exp(-viewCosine * 10.5) * (0.24 + airDensity * 0.22);
     float viewSunAlignment = dot(viewDirection, sunDirection);
     float forwardScatter = pow(max(viewSunAlignment, 0.0), 7.0);
-    float atmosphericDaylight = smoothstep(-0.06, 0.12, sunDot);
-    float atmosphericTwilight = twilightScattering(sunDot);
+    float atmosphericDaylight = smoothstep(-0.06, 0.12, sunDot) * (1.0 - surfaceEclipseShadow * 0.86);
+    float atmosphericTwilight = clamp(twilightScattering(sunDot) + surfaceEclipseWarm * 0.72, 0.0, 1.0);
 
     vec3 atmosphereColor = mix(
         vec3(0.001, 0.004, 0.014),
@@ -786,7 +899,7 @@ void main() {
     atmosphereColor = mix(atmosphereColor, vec3(1.02, 0.44, 0.22), warmAtmosphere * 0.78);
     atmosphereColor += forwardScatter * atmosphericDaylight * vec3(0.12, 0.16, 0.24);
 
-    float rimSunlight = smoothstep(-0.02, 0.16, sunDot);
+    float rimSunlight = smoothstep(-0.02, 0.16, sunDot) * (1.0 - surfaceEclipseShadow * 0.86);
     float rimTwilight = atmosphericTwilight
         * mix(0.40, 1.0, smoothstep(-0.15, 0.45, viewSunAlignment));
     vec3 rimColor = mix(
@@ -805,6 +918,8 @@ void main() {
         * (0.002 + 0.75 * rimSunlight + 0.95 * rimTwilight);
     surfaceColor += rimColor * rimIntensity;
 
-    vec3 finalRgb = mix(skyColor.rgb, softFilmicRollOff(surfaceColor), coverage);
-    fragColor = vec4(clamp(finalRgb, 0.0, 1.0), skyColor.a);
+    vec3 finalRgb = coverage >= 0.999
+        ? softFilmicRollOff(surfaceColor)
+        : mix(skyColor.rgb, softFilmicRollOff(surfaceColor), coverage);
+    fragColor = vec4(clamp(finalRgb, 0.0, 1.0), 1.0);
 }

@@ -43,6 +43,7 @@ import java.util.List;
 abstract class LevelRendererMixin {
     private static final double HIGH_ALTITUDE_WEATHER_THRESHOLD = 1024.0;
     private static final double OVERWORLD_SEA_LEVEL = 63.0;
+    private static final Vector3f UNIT_Z = new Vector3f(0.0F, 0.0F, 1.0F);
 
     @Shadow
     private VertexBuffer skyBuffer;
@@ -54,6 +55,30 @@ abstract class LevelRendererMixin {
     private boolean generateClouds;
 
     private float lumispheric$lastCloudDistance = Float.NaN;
+    private Matrix4f lumispheric$skyProjectionMatrix;
+    private float lumispheric$skyPartialTick;
+
+    @Inject(method = "renderSky", at = @At("HEAD"), require = 1)
+    private void lumispheric$captureSkyFrameParams(
+        Matrix4f frustumMatrix, Matrix4f projectionMatrix, float partialTick,
+        Camera camera, boolean foggy, Runnable setupFog, CallbackInfo callback
+    ) {
+        this.lumispheric$skyProjectionMatrix = projectionMatrix;
+        this.lumispheric$skyPartialTick = partialTick;
+    }
+
+    @Inject(method = "renderEndSky", at = @At("HEAD"), cancellable = true, require = 1)
+    private void lumispheric$renderCustomEndSky(PoseStack poseStack, CallbackInfo callback) {
+        ClientLevel level = Minecraft.getInstance().level;
+        if (!SkyRenderer.shouldRenderEnd(level)) {
+            return;
+        }
+        Matrix4f projection = this.lumispheric$skyProjectionMatrix != null
+            ? this.lumispheric$skyProjectionMatrix
+            : RenderSystem.getProjectionMatrix();
+        SkyRenderer.renderEnd(poseStack.last().pose(), projection, this.lumispheric$skyPartialTick, level);
+        callback.cancel();
+    }
 
     @Inject(method = "renderClouds", at = @At("HEAD"), require = 1)
     private void lumispheric$invalidateCloudMeshForDistanceChange(
@@ -206,17 +231,16 @@ abstract class LevelRendererMixin {
         float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
         float weather = SkyRenderer.weatherStrength(level, cameraY, partialTick);
         float alpha = lumispheric$weatherOpacity(weather);
-        double astronomicalTime = level.getDayTime() + partialTick;
-        double latitude = CelestialModel.latitudeRadians();
-        float sunUp = (float) CelestialModel.sunDirection(astronomicalTime, latitude).up();
-        float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude) * (1.0F - weather);
+        SkyRenderer.FrameAstronomy astro = SkyRenderer.frameAstronomy(level, partialTick);
+        float sunUp = (float) astro.sun().up();
+        float eclipse = astro.eclipseStrength() * (1.0F - weather);
         float brightness = 1.0F - eclipse * 0.90F;
         Vector3f tint = SkyRenderer.solarTransmission(sunUp, altitude);
         try {
             lumispheric$drawCelestialQuad(
                 frustumMatrix, partialTick, cameraY, true,
                 brightness * tint.x, brightness * tint.y, brightness * tint.z,
-                alpha, eclipse
+                alpha, eclipse, astro
             );
         } finally {
             mesh.close();
@@ -251,19 +275,17 @@ abstract class LevelRendererMixin {
         double cameraY = camera.getPosition().y;
         float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
         float alpha = lumispheric$weatherOpacity(SkyRenderer.weatherStrength(level, cameraY, partialTick));
-        double astronomicalTime = level.getDayTime() + partialTick;
-        double latitude = CelestialModel.latitudeRadians();
-        float moonUp = (float) CelestialModel.moonDirection(astronomicalTime, latitude).up();
-        // Subtle warm copper/amber tint when the Moon is very close to the horizon (Harvest Moon extinction).
+        SkyRenderer.FrameAstronomy astro = SkyRenderer.frameAstronomy(level, partialTick);
+        float moonUp = (float) astro.moon().up();
         Vector3f moonExtinction = SkyRenderer.solarTransmission(moonUp, altitude);
         float moonRed = Mth.lerp(0.65F, 1.0F, moonExtinction.x);
         float moonGreen = Mth.lerp(0.65F, 1.0F, moonExtinction.y);
         float moonBlue = Mth.lerp(0.65F, 1.0F, moonExtinction.z);
         try {
             lumispheric$drawCelestialQuad(
-                frustumMatrix, partialTick, cameraY, false, moonRed, moonGreen, moonBlue, alpha, 0.0F
+                frustumMatrix, partialTick, cameraY, false, moonRed, moonGreen, moonBlue, alpha, 0.0F, astro
             );
-            lumispheric$drawPlanets(frustumMatrix, projectionMatrix, partialTick, cameraY);
+            lumispheric$drawPlanets(frustumMatrix, projectionMatrix, partialTick, cameraY, astro);
         } finally {
             mesh.close();
         }
@@ -278,15 +300,12 @@ abstract class LevelRendererMixin {
         float green,
         float blue,
         float alpha,
-        float solarEclipse
+        float solarEclipse,
+        SkyRenderer.FrameAstronomy astro
     ) {
         ClientLevel level = Minecraft.getInstance().level;
-        double astronomicalTime = level.getDayTime() + partialTick;
-        double latitude = CelestialModel.latitudeRadians();
-        CelestialModel.Direction sunDir = CelestialModel.sunDirection(astronomicalTime, latitude);
-        CelestialModel.Direction direction = sun
-            ? sunDir
-            : CelestialModel.moonDirection(astronomicalTime, latitude);
+        CelestialModel.Direction sunDir = astro.sun();
+        CelestialModel.Direction direction = sun ? sunDir : astro.moon();
         float skyAngle = level.getTimeOfDay(partialTick);
         CelestialModel.BillboardBasis basis = CelestialModel.billboardBasis(direction);
 
@@ -298,8 +317,6 @@ abstract class LevelRendererMixin {
             );
         } else {
             float halfSize = 20.0F * Config.celestialSize;
-            // Always sample Full Moon tile (0,0) of moon_phases.png so resource packs work while the shader
-            // renders continuous, accurately Sun-aligned phases and earthshine.
             quad = CelestialModel.buildOrientedQuad(
                 direction, halfSize, 0.0F, 0.0F, 0.25F, 0.5F, skyAngle, basis
             );
@@ -318,8 +335,7 @@ abstract class LevelRendererMixin {
         float moonDaylight = sun
             ? 0.0F
             : SkyRenderer.surfaceDaylightStrength((float) sunDir.up(), cameraY);
-        // Subtle daytime visibility for a bright Moon (realistic pale daylight Moon), full brightness at night.
-        float moonIllum = CelestialModel.moonIllumination(astronomicalTime);
+        float moonIllum = astro.moonIllumination();
         float moonDayBrightness = 1.0F - moonDaylight * Mth.lerp(moonIllum, 0.95F, 0.68F);
         float earthshine = sun
             ? 0.0F
@@ -327,18 +343,16 @@ abstract class LevelRendererMixin {
         float spaceBlend = SkyRenderer.spaceTransition(cameraY);
         float solarBodyBrightness = Mth.lerp(spaceBlend, 0.82F, 1.0F);
         CelestialModel.LunarEclipse lunarEclipse = sun
-            ? new CelestialModel.LunarEclipse(0.0F, 0.0F, 0.0F, 0.0F)
-            : CelestialModel.lunarEclipse(astronomicalTime, latitude);
+            ? CelestialModel.NO_LUNAR_ECLIPSE
+            : astro.lunarEclipse();
         Vector3f bodyLightDir = sun
-            ? new Vector3f(0.0F, 0.0F, 1.0F)
+            ? UNIT_Z
             : CelestialModel.lightInBillboardFrame(sunDir, basis);
         float pixelatedStyle = Config.pixelatedStyle ? 1.0F : 0.0F;
 
-        PoseStack poseStack = new PoseStack();
-        poseStack.mulPose(frustumMatrix);
-        poseStack.mulPose(Axis.YP.rotationDegrees(-90.0F));
-        poseStack.mulPose(Axis.XP.rotationDegrees(skyAngle * 360.0F));
-        Matrix4f matrix = poseStack.last().pose();
+        Matrix4f matrix = new Matrix4f(frustumMatrix)
+            .rotateY((float) Math.toRadians(-90.0))
+            .rotateX((float) Math.toRadians(skyAngle * 360.0));
 
         if (bodyVisible) {
             lumispheric$drawCelestialPass(
@@ -349,15 +363,15 @@ abstract class LevelRendererMixin {
                 alpha, 0.0F, false, sun ? 1.0F : moonDayBrightness,
                 sun ? 0.0F : lunarEclipse.shadowOffsetX(),
                 sun ? 0.0F : lunarEclipse.shadowOffsetY(),
-                !sun, bodyLightDir, pixelatedStyle, earthshine, 0.0F, solarEclipse
+                !sun, bodyLightDir, pixelatedStyle, earthshine, sun ? spaceBlend : 0.0F, solarEclipse
             );
         }
         if (glowVisible) {
-            float glowRed = sun ? red : Mth.lerp(lunarEclipse.umbra(), 0.78F * red, 0.62F);
-            float glowGreen = sun ? green : Mth.lerp(lunarEclipse.umbra(), 0.84F * green, 0.18F);
-            float glowBlue = sun ? blue : Mth.lerp(lunarEclipse.umbra(), 0.95F * blue, 0.06F);
+            float glowRed = sun ? Mth.lerp(spaceBlend, red, 1.0F) : Mth.lerp(lunarEclipse.umbra(), 0.78F * red, 0.62F);
+            float glowGreen = sun ? Mth.lerp(spaceBlend, green, 1.0F) : Mth.lerp(lunarEclipse.umbra(), 0.84F * green, 0.18F);
+            float glowBlue = sun ? Mth.lerp(spaceBlend, blue, 1.0F) : Mth.lerp(lunarEclipse.umbra(), 0.95F * blue, 0.06F);
             float glowIntensity = sun
-                ? Mth.lerp(spaceBlend, 0.008F, 0.0025F)
+                ? Mth.lerp(spaceBlend, 0.008F, 0.0045F)
                 : 0.018F * moonIllum
                     * (1.0F - moonDaylight)
                     * (1.0F - lunarEclipse.penumbra() * 0.35F - lunarEclipse.umbra() * 0.55F);
@@ -366,7 +380,7 @@ abstract class LevelRendererMixin {
                     glowQuad, matrix, horizon, fadeTop, cameraY,
                     glowRed, glowGreen, glowBlue, alpha * glowIntensity,
                     glowScale, true, 1.0F, 0.0F, 0.0F, !sun,
-                    bodyLightDir, pixelatedStyle, 0.0F, 0.0F, 0.0F
+                    bodyLightDir, pixelatedStyle, 0.0F, sun ? spaceBlend : 0.0F, 0.0F
                 );
             }
         }
@@ -406,7 +420,8 @@ abstract class LevelRendererMixin {
         Matrix4f frustumMatrix,
         Matrix4f projectionMatrix,
         float partialTick,
-        double cameraY
+        double cameraY,
+        SkyRenderer.FrameAstronomy astro
     ) {
         Minecraft mc = Minecraft.getInstance();
         ClientLevel level = mc.level;
@@ -414,8 +429,6 @@ abstract class LevelRendererMixin {
             return;
         }
 
-        double astronomicalTime = level.getDayTime() + partialTick;
-        double latitude = CelestialModel.latitudeRadians();
         float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
         float skyAngle = level.getTimeOfDay(partialTick);
         float horizon = SkyRenderer.celestialHorizonLevel(cameraY);
@@ -423,19 +436,16 @@ abstract class LevelRendererMixin {
         float weather = SkyRenderer.weatherStrength(level, cameraY, partialTick);
         float weatherAlpha = lumispheric$weatherOpacity(weather);
 
-        float sunUp = (float) CelestialModel.sunDirection(astronomicalTime, latitude).up();
+        float sunUp = (float) astro.sun().up();
         float nightStrength = SkyRenderer.astronomicalNightStrength(sunUp, altitude);
         float spaceBlend = SkyRenderer.spaceTransition(cameraY);
-        float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude) * (1.0F - weather);
+        float eclipse = astro.eclipseStrength() * (1.0F - weather);
 
-        // Detect Spyglass scoping or optical zoom mods via projection matrix FOV scale (m11 = cot(fovY / 2)).
         boolean scoping = mc.player != null && mc.player.isScoping();
         float projZoom = Mth.clamp((projectionMatrix.m11() - 3.5F) / 6.5F, 0.0F, 1.0F);
         float zoomLevel = scoping ? 1.0F : projZoom;
         float telescopeBlend = lumispheric$smoothstep(0.25F, 0.85F, zoomLevel);
 
-        // Realistic limiting visual magnitude: hides planets in bright daylight, reveals Venus/Jupiter in twilight,
-        // classical 5 planets at night, and Uranus/Neptune through the Spyglass or from space.
         float dayLimit = -5.5F + zoomLevel * 2.2F;
         float nightLimit = 5.8F + zoomLevel * 3.4F;
         float skyMagLimit = Mth.lerp(Math.max(nightStrength, spaceBlend), dayLimit, nightLimit)
@@ -443,93 +453,195 @@ abstract class LevelRendererMixin {
             + spaceBlend * 2.5F;
 
         float pixelatedStyle = Config.pixelatedStyle ? 1.0F : 0.0F;
+        boolean nakedEyeBatch = telescopeBlend < 0.15F;
 
-        PoseStack poseStack = new PoseStack();
-        poseStack.mulPose(frustumMatrix);
-        poseStack.mulPose(Axis.YP.rotationDegrees(-90.0F));
-        poseStack.mulPose(Axis.XP.rotationDegrees(skyAngle * 360.0F));
-        Matrix4f matrix = poseStack.last().pose();
+        Matrix4f matrix = new Matrix4f(frustumMatrix)
+            .rotateY((float) Math.toRadians(-90.0))
+            .rotateX((float) Math.toRadians(skyAngle * 360.0));
 
-        for (CelestialModel.PlanetDirection planetDirection : CelestialModel.planetDirections(
-            astronomicalTime, latitude
-        )) {
+        CelestialModel.PlanetDirection[] planets = CelestialModel.planetDirections(
+            astro.astronomicalTime(), astro.latitude()
+        );
+
+        // Compute billboard basis, quad, and atmospheric extinction once per visible planet,
+        // then emit batched halos and stars sequentially (Tesselator supports one active BufferBuilder at a time).
+        int count = planets.length;
+        CelestialModel.QuadVertex[][] bodyQuads = new CelestialModel.QuadVertex[count][];
+        CelestialModel.QuadVertex[][] glowQuads = new CelestialModel.QuadVertex[count][];
+        float[] pReds = new float[count];
+        float[] pGreens = new float[count];
+        float[] pBlues = new float[count];
+        float[] pAlphas = new float[count];
+        float[] haloAlphas = new float[count];
+        CelestialModel.BillboardBasis[] bases = nakedEyeBatch ? null : new CelestialModel.BillboardBasis[count];
+        boolean anyGlow = false;
+        boolean anyBody = false;
+
+        for (int i = 0; i < count; i++) {
+            CelestialModel.PlanetDirection planetDirection = planets[i];
             CelestialModel.Planet planet = planetDirection.planet();
-            float magMargin = skyMagLimit - planet.apparentMagnitude();
-            float visibility = lumispheric$smoothstep(-0.6F, 1.8F, magMargin);
+            float visibility = lumispheric$smoothstep(-0.6F, 1.8F, skyMagLimit - planet.apparentMagnitude());
             if (visibility <= 0.01F) {
                 continue;
             }
 
             CelestialModel.Direction direction = planetDirection.direction();
             CelestialModel.BillboardBasis basis = CelestialModel.billboardBasis(direction);
-            Vector3f lightDir = CelestialModel.lightInBillboardFrame(
-                planetDirection.sunDirectionFromPlanet(), basis
-            );
-
-            // Realistic naked-eye star size expanding smoothly into an observable telescopic disk with the Spyglass.
             float nakedHalfSize = 0.075F + planet.intensity() * 0.085F;
             float telescopeScale = planet.name().equals("Saturn") ? 3.2F : 2.25F;
-            float halfSize = Mth.lerp(telescopeBlend, nakedHalfSize, planet.halfSize() * telescopeScale);
+            float halfSize = nakedEyeBatch
+                ? nakedHalfSize
+                : Mth.lerp(telescopeBlend, nakedHalfSize, planet.halfSize() * telescopeScale);
 
             CelestialModel.QuadVertex[] quad = CelestialModel.buildOrientedQuad(
                 direction, halfSize, 0.0F, 0.0F, 1.0F, 1.0F, skyAngle, basis
             );
-            if (!lumispheric$hasSkyVisibility(quad, horizon)) {
-                continue;
-            }
+            boolean bodyVisible = lumispheric$hasSkyVisibility(quad, horizon);
 
-            // Atmospheric extinction near the horizon subtly warms low planets.
-            Vector3f extinction = SkyRenderer.solarTransmission((float) direction.up(), altitude);
-            float pRed = planet.red() * Mth.lerp(0.55F, 1.0F, extinction.x);
-            float pGreen = planet.green() * Mth.lerp(0.55F, 1.0F, extinction.y);
-            float pBlue = planet.blue() * Mth.lerp(0.55F, 1.0F, extinction.z);
-            float finalAlpha = weatherAlpha * visibility;
-            float planetType = lumispheric$planetType(planet.name());
-
-            // Subtle halo for very bright planets (Venus, Jupiter, bright Mars/Saturn).
+            CelestialModel.QuadVertex[] glowQuad = null;
+            float haloStrength = 0.0F;
             if (planet.apparentMagnitude() < 0.8F) {
-                float haloStrength = lumispheric$smoothstep(0.8F, -3.5F, planet.apparentMagnitude())
+                haloStrength = lumispheric$smoothstep(0.8F, -3.5F, planet.apparentMagnitude())
                     * (1.0F - telescopeBlend * 0.55F);
-                CelestialModel.QuadVertex[] glowQuad = lumispheric$scaleCelestialQuad(
-                    quad, Mth.lerp(telescopeBlend, 3.2F, 1.55F), skyAngle
-                );
-                if (haloStrength > 0.01F && lumispheric$hasSkyVisibility(glowQuad, horizon)) {
-                    BufferBuilder glowBuilder = Tesselator.getInstance().begin(
-                        VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_TEX_COLOR
+                if (haloStrength > 0.01F) {
+                    CelestialModel.QuadVertex[] candidateGlow = lumispheric$scaleCelestialQuad(
+                        quad, Mth.lerp(telescopeBlend, 3.2F, 1.55F), skyAngle
                     );
-                    lumispheric$emitCelestialTriangle(
-                        glowBuilder, matrix, glowQuad[0], glowQuad[1], glowQuad[2],
-                        horizon, fadeTop, cameraY, 1.0F
-                    );
-                    lumispheric$emitCelestialTriangle(
-                        glowBuilder, matrix, glowQuad[0], glowQuad[2], glowQuad[3],
-                        horizon, fadeTop, cameraY, 1.0F
-                    );
-                    try {
-                        RenderSystem.enableBlend();
-                        RenderSystem.blendFuncSeparate(
-                            GlStateManager.SourceFactor.SRC_ALPHA,
-                            GlStateManager.DestFactor.ONE,
-                            GlStateManager.SourceFactor.ONE,
-                            GlStateManager.DestFactor.ZERO
-                        );
-                        ShaderInstance glowShader = LumisphericClient.getCelestialShader(
-                            pRed, pGreen, pBlue, finalAlpha * 0.14F * haloStrength, 1.55F,
-                            0.0F, 0.0F, false, 2.0F, planetType,
-                            lightDir, pixelatedStyle, 0.0F, zoomLevel, 0.0F
-                        );
-                        RenderSystem.setShader(() -> glowShader);
-                        BufferUploader.drawWithShader(glowBuilder.buildOrThrow());
-                    } finally {
-                        VertexBuffer.unbind();
-                        RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
-                        RenderSystem.defaultBlendFunc();
+                    if (lumispheric$hasSkyVisibility(candidateGlow, horizon)) {
+                        glowQuad = candidateGlow;
                     }
                 }
             }
+            if (!bodyVisible && glowQuad == null) {
+                continue;
+            }
 
-            // Mode 3 (crisp square star) at naked eye, Mode 1 (detailed telescopic disk + phases) through Spyglass.
-            float planetMode = telescopeBlend < 0.15F ? 3.0F : 1.0F;
+            Vector3f extinction = SkyRenderer.solarTransmission((float) direction.up(), altitude);
+            pReds[i] = planet.red() * Mth.lerp(0.55F, 1.0F, extinction.x);
+            pGreens[i] = planet.green() * Mth.lerp(0.55F, 1.0F, extinction.y);
+            pBlues[i] = planet.blue() * Mth.lerp(0.55F, 1.0F, extinction.z);
+            pAlphas[i] = weatherAlpha * visibility;
+
+            if (bodyVisible) {
+                bodyQuads[i] = quad;
+                if (bases != null) {
+                    bases[i] = basis;
+                }
+                anyBody = true;
+            }
+            if (glowQuad != null) {
+                glowQuads[i] = glowQuad;
+                haloAlphas[i] = pAlphas[i] * 0.14F * haloStrength;
+                anyGlow = true;
+            }
+        }
+
+        // 1. Batch all bright planet halos into a single draw call.
+        if (anyGlow) {
+            BufferBuilder glowBatch = Tesselator.getInstance().begin(
+                VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_TEX_COLOR
+            );
+            for (int i = 0; i < count; i++) {
+                CelestialModel.QuadVertex[] glowQuad = glowQuads[i];
+                if (glowQuad == null) {
+                    continue;
+                }
+                lumispheric$emitColoredCelestialTriangle(
+                    glowBatch, matrix, glowQuad[0], glowQuad[1], glowQuad[2],
+                    horizon, fadeTop, cameraY, pReds[i], pGreens[i], pBlues[i], haloAlphas[i]
+                );
+                lumispheric$emitColoredCelestialTriangle(
+                    glowBatch, matrix, glowQuad[0], glowQuad[2], glowQuad[3],
+                    horizon, fadeTop, cameraY, pReds[i], pGreens[i], pBlues[i], haloAlphas[i]
+                );
+            }
+            MeshData glowMesh = glowBatch.build();
+            if (glowMesh != null) {
+                try {
+                    RenderSystem.enableBlend();
+                    RenderSystem.blendFuncSeparate(
+                        GlStateManager.SourceFactor.SRC_ALPHA,
+                        GlStateManager.DestFactor.ONE,
+                        GlStateManager.SourceFactor.ONE,
+                        GlStateManager.DestFactor.ZERO
+                    );
+                    ShaderInstance glowShader = LumisphericClient.getCelestialShader(
+                        1.0F, 1.0F, 1.0F, 1.0F, 1.55F,
+                        0.0F, 0.0F, false, 2.0F, 0.0F,
+                        UNIT_Z, pixelatedStyle, 0.0F, zoomLevel, 0.0F
+                    );
+                    RenderSystem.setShader(() -> glowShader);
+                    BufferUploader.drawWithShader(glowMesh);
+                } finally {
+                    VertexBuffer.unbind();
+                    RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+                    RenderSystem.defaultBlendFunc();
+                }
+            }
+        }
+
+        if (!anyBody) {
+            return;
+        }
+
+        // 2. Batch all naked-eye planet squares into a single draw call.
+        if (nakedEyeBatch) {
+            BufferBuilder starBatch = Tesselator.getInstance().begin(
+                VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_TEX_COLOR
+            );
+            for (int i = 0; i < count; i++) {
+                CelestialModel.QuadVertex[] quad = bodyQuads[i];
+                if (quad == null) {
+                    continue;
+                }
+                lumispheric$emitColoredCelestialTriangle(
+                    starBatch, matrix, quad[0], quad[1], quad[2],
+                    horizon, fadeTop, cameraY, pReds[i], pGreens[i], pBlues[i], pAlphas[i]
+                );
+                lumispheric$emitColoredCelestialTriangle(
+                    starBatch, matrix, quad[0], quad[2], quad[3],
+                    horizon, fadeTop, cameraY, pReds[i], pGreens[i], pBlues[i], pAlphas[i]
+                );
+            }
+            MeshData mesh = starBatch.build();
+            if (mesh != null) {
+                try {
+                    RenderSystem.enableBlend();
+                    RenderSystem.blendFuncSeparate(
+                        GlStateManager.SourceFactor.SRC_ALPHA,
+                        GlStateManager.DestFactor.ONE,
+                        GlStateManager.SourceFactor.ONE,
+                        GlStateManager.DestFactor.ZERO
+                    );
+                    ShaderInstance shader = LumisphericClient.getCelestialShader(
+                        1.0F, 1.0F, 1.0F, 1.0F, 1.0F,
+                        0.0F, 0.0F, false, 3.0F, 0.0F,
+                        UNIT_Z, pixelatedStyle, 0.0F, zoomLevel, 0.0F
+                    );
+                    RenderSystem.setShader(() -> shader);
+                    BufferUploader.drawWithShader(mesh);
+                } finally {
+                    VertexBuffer.unbind();
+                    RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+                    RenderSystem.defaultBlendFunc();
+                }
+            }
+            return;
+        }
+
+        // 3. Telescopic (Spyglass / Zoom) planet disks with per-planet surface, phase, and rings.
+        for (int i = 0; i < count; i++) {
+            CelestialModel.QuadVertex[] quad = bodyQuads[i];
+            if (quad == null) {
+                continue;
+            }
+            CelestialModel.PlanetDirection planetDirection = planets[i];
+            CelestialModel.Planet planet = planetDirection.planet();
+            Vector3f lightDir = CelestialModel.lightInBillboardFrame(
+                planetDirection.sunDirectionFromPlanet(), bases[i]
+            );
+            float planetType = lumispheric$planetType(planet.name());
+
             BufferBuilder builder = Tesselator.getInstance().begin(
                 VertexFormat.Mode.TRIANGLES, DefaultVertexFormat.POSITION_TEX_COLOR
             );
@@ -539,25 +651,21 @@ abstract class LevelRendererMixin {
             lumispheric$emitCelestialTriangle(
                 builder, matrix, quad[0], quad[2], quad[3], horizon, fadeTop, cameraY, 1.0F
             );
+            MeshData mesh = builder.build();
+            if (mesh == null) {
+                continue;
+            }
             try {
                 RenderSystem.enableBlend();
-                if (planetMode > 2.5F) {
-                    RenderSystem.blendFuncSeparate(
-                        GlStateManager.SourceFactor.SRC_ALPHA,
-                        GlStateManager.DestFactor.ONE,
-                        GlStateManager.SourceFactor.ONE,
-                        GlStateManager.DestFactor.ZERO
-                    );
-                } else {
-                    RenderSystem.defaultBlendFunc();
-                }
+                RenderSystem.defaultBlendFunc();
+                RenderSystem.setShaderColor(pReds[i], pGreens[i], pBlues[i], pAlphas[i]);
                 ShaderInstance shader = LumisphericClient.getCelestialShader(
-                    pRed, pGreen, pBlue, finalAlpha, 1.0F,
-                    0.0F, 0.0F, false, planetMode, planetType,
+                    pReds[i], pGreens[i], pBlues[i], pAlphas[i], 1.0F,
+                    0.0F, 0.0F, false, 1.0F, planetType,
                     lightDir, pixelatedStyle, 0.0F, zoomLevel, 0.0F
                 );
                 RenderSystem.setShader(() -> shader);
-                BufferUploader.drawWithShader(builder.buildOrThrow());
+                BufferUploader.drawWithShader(mesh);
             } finally {
                 VertexBuffer.unbind();
                 RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
@@ -613,6 +721,10 @@ abstract class LevelRendererMixin {
             vertexAlphaScale
         );
 
+        MeshData mesh = builder.build();
+        if (mesh == null) {
+            return;
+        }
         if (additive) {
             RenderSystem.enableBlend();
             RenderSystem.blendFuncSeparate(
@@ -629,7 +741,7 @@ abstract class LevelRendererMixin {
                 0.0F, 0.0F, bodyLightDir, pixelatedStyle, earthshine, spyglassZoom, solarEclipse
             );
             RenderSystem.setShader(() -> shader);
-            BufferUploader.drawWithShader(builder.buildOrThrow());
+            BufferUploader.drawWithShader(mesh);
         } finally {
             VertexBuffer.unbind();
             RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
@@ -647,14 +759,48 @@ abstract class LevelRendererMixin {
         double cameraY,
         float vertexAlphaScale
     ) {
+        lumispheric$emitColoredCelestialTriangle(
+            builder, matrix, first, second, third, horizon, fadeTop, cameraY,
+            1.0F, 1.0F, 1.0F, vertexAlphaScale
+        );
+    }
+
+    private static void lumispheric$emitColoredCelestialTriangle(
+        BufferBuilder builder,
+        Matrix4f matrix,
+        CelestialModel.QuadVertex first,
+        CelestialModel.QuadVertex second,
+        CelestialModel.QuadVertex third,
+        float horizon,
+        float fadeTop,
+        double cameraY,
+        float red,
+        float green,
+        float blue,
+        float vertexAlphaScale
+    ) {
+        float u0 = first.localUp();
+        float u1 = second.localUp();
+        float u2 = third.localUp();
+        if (u0 <= horizon && u1 <= horizon && u2 <= horizon) {
+            return;
+        }
+        // Fast path: 99% of celestial triangles are completely above the horizon fade band (0 allocations).
+        if (u0 >= fadeTop && u1 >= fadeTop && u2 >= fadeTop) {
+            lumispheric$emitVertex(builder, matrix, first, cameraY, false, red, green, blue, vertexAlphaScale);
+            lumispheric$emitVertex(builder, matrix, second, cameraY, false, red, green, blue, vertexAlphaScale);
+            lumispheric$emitVertex(builder, matrix, third, cameraY, false, red, green, blue, vertexAlphaScale);
+            return;
+        }
+
         List<CelestialModel.QuadVertex> triangle = List.of(first, second, third);
         List<CelestialModel.QuadVertex> fadeBand = lumispheric$clipPolygon(
             lumispheric$clipPolygon(triangle, horizon, true), fadeTop, false
         );
-        lumispheric$emitPolygon(builder, matrix, fadeBand, cameraY, true, vertexAlphaScale);
+        lumispheric$emitPolygon(builder, matrix, fadeBand, cameraY, true, red, green, blue, vertexAlphaScale);
 
         List<CelestialModel.QuadVertex> opaqueRegion = lumispheric$clipPolygon(triangle, fadeTop, true);
-        lumispheric$emitPolygon(builder, matrix, opaqueRegion, cameraY, false, vertexAlphaScale);
+        lumispheric$emitPolygon(builder, matrix, opaqueRegion, cameraY, false, red, green, blue, vertexAlphaScale);
     }
 
     private static List<CelestialModel.QuadVertex> lumispheric$clipPolygon(
@@ -704,6 +850,9 @@ abstract class LevelRendererMixin {
         List<CelestialModel.QuadVertex> polygon,
         double cameraY,
         boolean fadeBand,
+        float red,
+        float green,
+        float blue,
         float vertexAlphaScale
     ) {
         if (polygon.size() < 3) {
@@ -712,11 +861,9 @@ abstract class LevelRendererMixin {
 
         CelestialModel.QuadVertex first = polygon.get(0);
         for (int i = 1; i < polygon.size() - 1; i++) {
-            lumispheric$emitVertex(builder, matrix, first, cameraY, fadeBand, vertexAlphaScale);
-            lumispheric$emitVertex(builder, matrix, polygon.get(i), cameraY, fadeBand, vertexAlphaScale);
-            lumispheric$emitVertex(
-                builder, matrix, polygon.get(i + 1), cameraY, fadeBand, vertexAlphaScale
-            );
+            lumispheric$emitVertex(builder, matrix, first, cameraY, fadeBand, red, green, blue, vertexAlphaScale);
+            lumispheric$emitVertex(builder, matrix, polygon.get(i), cameraY, fadeBand, red, green, blue, vertexAlphaScale);
+            lumispheric$emitVertex(builder, matrix, polygon.get(i + 1), cameraY, fadeBand, red, green, blue, vertexAlphaScale);
         }
     }
 
@@ -726,6 +873,9 @@ abstract class LevelRendererMixin {
         CelestialModel.QuadVertex vertex,
         double cameraY,
         boolean fadeBand,
+        float red,
+        float green,
+        float blue,
         float vertexAlphaScale
     ) {
         float opacity = (fadeBand
@@ -733,7 +883,7 @@ abstract class LevelRendererMixin {
             : 1.0F) * vertexAlphaScale;
         builder.addVertex(matrix, vertex.x(), vertex.y(), vertex.z())
             .setUv(vertex.u(), vertex.v())
-            .setColor(1.0F, 1.0F, 1.0F, opacity);
+            .setColor(red, green, blue, opacity);
     }
 
     private static float lumispheric$weatherOpacity(float weather) {
@@ -784,26 +934,23 @@ abstract class LevelRendererMixin {
             float weatherFade = SkyRenderer.weatherFade(cameraY);
             float rain = level.getRainLevel(partialTick) * weatherFade;
             float thunder = level.getThunderLevel(partialTick) * weatherFade;
-            double astronomicalTime = level.getDayTime() + partialTick;
-            double latitude = CelestialModel.latitudeRadians();
-            CelestialModel.Direction sun = CelestialModel.sunDirection(astronomicalTime, latitude);
-            CelestialModel.Direction moon = CelestialModel.moonDirection(astronomicalTime, latitude);
-            SkyRenderer.Twilight twilight = SkyRenderer.twilightPalette((float) sun.up(), altitude);
-            float nightStrength = SkyRenderer.astronomicalNightStrength((float) sun.up(), altitude);
-            float moonIllum = CelestialModel.moonIllumination(astronomicalTime);
+            SkyRenderer.FrameAstronomy astro = SkyRenderer.frameAstronomy(level, partialTick);
+            float sunUp = (float) astro.sun().up();
+            SkyRenderer.Twilight twilight = SkyRenderer.twilightPalette(sunUp, altitude);
+            float nightStrength = SkyRenderer.astronomicalNightStrength(sunUp, altitude);
             ShaderInstance cloudShader = LumisphericClient.getCloudShader(
                 rain,
                 thunder,
-                sun,
-                moon,
+                astro.sun(),
+                astro.moon(),
                 SkyRenderer.cloudDeckOpacity(cameraY),
                 twilight.red(),
                 twilight.green(),
                 twilight.blue(),
                 twilight.strength(),
-                moonIllum,
+                astro.moonIllumination(),
                 nightStrength,
-                (float) sun.up(),
+                sunUp,
                 SkyRenderer.biomeDust()
             );
             buffer.drawWithShader(pose, projection, cloudShader);

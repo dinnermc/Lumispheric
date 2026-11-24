@@ -22,8 +22,15 @@
     { "name": "SkyParams2", "type": "float", "count": 4, "values": [ 0.85, 0.7, 0.0, 0.0 ] },
     { "name": "TwilightColor", "type": "float", "count": 4, "values": [ 0.96, 0.5, 0.2, 0.0 ] },
     { "name": "TwilightExtra", "type": "float", "count": 4, "values": [ 0.0, 0.0, 1.0, 1.0 ] },
-    { "name": "MeteorStart", "type": "float", "count": 4, "values": [ 0.0, 0.5, 0.0, 0.0 ] },
-    { "name": "MeteorParams", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+    { "name": "TimeParams", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+    { "name": "Meteor0Start", "type": "float", "count": 4, "values": [ 0.0, 0.5, 0.0, 0.0 ] },
+    { "name": "Meteor0State", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+    { "name": "Meteor1Start", "type": "float", "count": 4, "values": [ 0.0, 0.5, 0.0, 0.0 ] },
+    { "name": "Meteor1State", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+    { "name": "Meteor2Start", "type": "float", "count": 4, "values": [ 0.0, 0.5, 0.0, 0.0 ] },
+    { "name": "Meteor2State", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
+    { "name": "Meteor3Start", "type": "float", "count": 4, "values": [ 0.0, 0.5, 0.0, 0.0 ] },
+    { "name": "Meteor3State", "type": "float", "count": 4, "values": [ 0.0, 0.0, 0.0, 0.0 ] },
     { "name": "PlanetParams", "type": "float", "count": 4, "values": [ 6371000.0, 0.0, 0.0, 0.0 ] },
     { "name": "ColorModulator", "type": "float", "count": 4, "values": [ 1.0, 1.0, 1.0, 1.0 ] }
   ]

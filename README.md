@@ -12,10 +12,10 @@
     <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" />
   </p>
 
-  <p>A custom sky, clouds, and distant horizon for the <b>Overworld</b>.</p>
+  <p>A custom procedural sky, astronomy system, and cosmic horizon for the <b>Overworld</b> and <b>The End</b>.</p>
 </div>
 
-**Latest release: 1.2.0** — download it from
+**Latest release: 1.3.0** — download it from
 [GitHub Releases](https://github.com/dinnermc/Lumispheric/releases/latest) or [Modrinth](https://modrinth.com/mod/lumispheric).
 
 ## Features
@@ -23,25 +23,36 @@
 - GPU-rendered Overworld atmosphere with rich day, sunrise, sunset, Belt of
   Venus, Earth's shadow, and night transitions. Horizon fog stays consistent
   with the sky and responds smoothly to weather and biomes.
-- Familiar Minecraft Sun and Moon with atmospheric horizon reddening,
-  continuous Sun-aligned lunar phases with earthshine, soft glows, and solar
-  and lunar eclipses.
+- Familiar Minecraft Sun and Moon with atmospheric horizon reddening, pure white
+  Sun in space, continuous Sun-aligned lunar phases with earthshine, soft glows,
+  and solar and lunar eclipses that darken the world and cast a moving lunar
+  shadow across the planet and atmosphere from orbit.
+- Dynamic Overworld night darkness driven by the Moon's real phase, altitude,
+  lunar eclipses, and weather — leaving torches, lanterns, and caves untouched.
 - Real star positions and B-V colors from the HYG star database, with
-  atmospheric twinkling near the horizon that fades away in space.
+  atmospheric twinkling near the horizon that fades smoothly into space.
 - Real-orbit Solar System planets that shine like bright, non-twinkling stars
   at night and resolve into detailed disks (with real phases and Saturn's
   rings) when viewed through a Spyglass.
+- Subtle Spyglass HUD indicator that softly names celestial bodies (Sun, Moon
+  phases, Solar System planets, famous stars, meteor shower radiants, Galactic
+  Center, and The End's Eye of the Universe) as you aim at the sky.
 - Procedural Milky Way anchored in galactic coordinates, polar-aligned
-  auroras, and smooth real-time shooting stars.
+  auroras, sporadic shooting stars, and seasonal **Perseids** and **Geminids**
+  meteor showers radiating from their real celestial radiants.
+- **The End** redesigned around a towering purple cosmic storm vortex inspired
+  by the *Eye of the Universe*, complete with internal quantum lightning,
+  purple atmospheric horizon fog, amethyst terrain lighting, and rare silent
+  distant supernovae.
 - Extended vanilla clouds tinted by sunrise, sunset, moonlight, and weather
   that fade cleanly into the distance.
 - At high altitude, the horizon opens onto a procedural planet with continents,
   oceans, swirling weather clouds casting ground shadows, an atmospheric limb,
   and gradual transition into deep space.
 - Switch between **Minecraft (Pixel)** and **Realistic (Smooth)** visual
-  styles, adjust the astronomical year length and latitude, or pick from
-  Vanilla+, Realistic, and Performance presets in a live-preview configuration
-  screen.
+  styles, toggle End sky, lunar nights, and Spyglass HUD individually, adjust
+  the astronomical year length and latitude, or pick from Vanilla+, Realistic,
+  and Performance presets in a live-preview configuration screen.
 - Works alongside Sodium. When an Iris shaderpack is active, Lumispheric gets
   out of the way and restores its sky when the shaderpack is turned off.
 
@@ -116,7 +127,9 @@ the same color mapping as the built-in catalog.
 - **Iris:** Lumispheric disables its custom sky while a shaderpack is active and
   resumes when shaders are turned off.
 - Mods that change the sky, fog, clouds, or Sun and Moon rendering may conflict.
-- **Other dimensions:** Lumispheric's custom sky is limited to the Overworld.
+- **Other dimensions:** Lumispheric customizes the Overworld and The End (which
+  can be toggled independently in settings). The Nether keeps its usual
+  appearance.
 
 ## License and third-party data
 

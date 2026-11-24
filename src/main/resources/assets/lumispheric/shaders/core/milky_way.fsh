@@ -55,15 +55,67 @@ vec3 quantizeCubeSphere(vec3 dir, float cellsPerFace) {
     return normalize(snapped);
 }
 
+// Projects any unit direction onto a flat 2D cube-face grid so procedural micro-stars
+// are always clean circular points (or crisp pixels), never clipped 3D-voxel triangles.
+void cubeFaceUV(vec3 d, out float faceId, out vec2 uv) {
+    vec3 ad = abs(d);
+    if (ad.x >= ad.y && ad.x >= ad.z) {
+        faceId = d.x > 0.0 ? 0.0 : 1.0;
+        uv = vec2(d.z, d.y) / max(ad.x, 1.0e-5);
+    } else if (ad.y >= ad.x && ad.y >= ad.z) {
+        faceId = d.y > 0.0 ? 2.0 : 3.0;
+        uv = vec2(d.x, d.z) / max(ad.y, 1.0e-5);
+    } else {
+        faceId = d.z > 0.0 ? 4.0 : 5.0;
+        uv = vec2(d.x, d.y) / max(ad.z, 1.0e-5);
+    }
+}
+
+float milkyWayMicroStars(vec3 dir, bool isPixelStyle) {
+    float faceId;
+    vec2 faceUV;
+    cubeFaceUV(dir, faceId, faceUV);
+    float cellsPerFace = isPixelStyle ? 150.0 : 210.0;
+    vec2 scaled = (faceUV * 0.5 + 0.5) * cellsPerFace;
+    vec2 cell = floor(scaled);
+    vec2 local = fract(scaled);
+    vec3 seed = vec3(cell, faceId * 17.0 + 3.0);
+    float h = hashCell(seed);
+    if (h <= 0.962) {
+        return 0.0;
+    }
+    float bright = smoothstep(0.962, 0.998, h);
+    if (isPixelStyle) {
+        vec2 d = abs(local - 0.5);
+        float shape = step(max(d.x, d.y), 0.36);
+        return bright * shape;
+    }
+    // Jitter inside [0.25, 0.75]^2 with radius <= 0.21 so stars never touch cell borders.
+    vec2 center = vec2(
+        0.25 + 0.50 * hashCell(seed + vec3(11.0, 5.0, 1.0)),
+        0.25 + 0.50 * hashCell(seed + vec3(23.0, 13.0, 2.0))
+    );
+    float dist = length(local - center);
+    float shape = 1.0 - smoothstep(0.05, 0.21, dist);
+    return bright * shape;
+}
+
 void main() {
     vec3 viewDirection = normalize(localPosition);
+
+    // Early-out far from the galactic plane before running any 3D noise (~60% sky pixels skipped!).
+    vec3 gNorth = normalize(GalacticNorth);
+    float planeSin = dot(viewDirection, gNorth);
+    if (abs(planeSin) > 0.72) {
+        discard;
+    }
+
     float elevation = asin(clamp(viewDirection.y, -1.0, 1.0));
     float horizon = -MilkyWayParams.x;
     float spaceBlend = clamp(MilkyWayParams.y, 0.0, 1.0);
     bool isPixelStyle = MilkyWayParams.z > 0.5;
     float planetBlend = clamp(MilkyWayParams.w, 0.0, 1.0);
 
-    // Clip cleanly above the planetary horizon so the Milky Way never shines over the planet below.
     float planetClip = mix(
         1.0,
         smoothstep(horizon - 0.008, horizon + PLANET_HORIZON_TOP_FADE + 0.014, elevation),
@@ -79,17 +131,14 @@ void main() {
         discard;
     }
 
-    // Orthonormal galactic frame locked rigidly to the rotating celestial sphere.
-    vec3 gNorth = normalize(GalacticNorth);
     vec3 gCenter = normalize(GalacticCenter - gNorth * dot(GalacticCenter, gNorth));
     vec3 gEast = normalize(cross(gNorth, gCenter));
 
     vec3 rawGalDir = vec3(
         dot(viewDirection, gCenter),
-        dot(viewDirection, gNorth),
+        planeSin,
         dot(viewDirection, gEast)
     );
-    // In Minecraft (Pixel) style, snap galactic coordinates cleanly to match Minecraft's square starfield.
     vec3 galDir = isPixelStyle ? quantizeCubeSphere(rawGalDir, 150.0) : rawGalDir;
 
     float galacticLatitude = asin(clamp(galDir.y, -1.0, 1.0));
@@ -109,18 +158,18 @@ void main() {
     float fineFilaments = fbm(cloudCoords * 2.4 + vec3(13.0, 27.0, 5.0));
     float brightKnots = smoothstep(0.42, 0.78, starClouds * 0.62 + fineFilaments * 0.38);
 
-    // Great Rift dark dust lane splitting the Milky Way.
-    float riftWave = (fbm(galDir * 5.2 + vec3(41.0, 9.0, 17.0)) - 0.5) * 0.11;
-    float riftCenter = galacticLatitude - riftWave;
-    float riftBand = exp(-pow(riftCenter / 0.055, 2.0));
-    float riftWisps = smoothstep(0.32, 0.68, fbm(galDir * 18.0 + warp * 2.2 + vec3(7.0, 31.0, 13.0)));
-    float darkRift = riftBand * riftWisps * (0.55 + 0.45 * smoothstep(-0.3, 0.7, galDir.x));
-    float dustTransmission = 1.0 - clamp(darkRift * 0.82, 0.0, 0.85);
+    // Skip Great Rift dark dust noise outside the central band (saves 8 valueNoise calls per outer-halo pixel).
+    float dustTransmission = 1.0;
+    if (abs(galacticLatitude) < 0.24) {
+        float riftWave = (fbm(galDir * 5.2 + vec3(41.0, 9.0, 17.0)) - 0.5) * 0.11;
+        float riftCenter = galacticLatitude - riftWave;
+        float riftBand = exp(-pow(riftCenter / 0.055, 2.0));
+        float riftWisps = smoothstep(0.32, 0.68, fbm(galDir * 18.0 + warp * 2.2 + vec3(7.0, 31.0, 13.0)));
+        float darkRift = riftBand * riftWisps * (0.55 + 0.45 * smoothstep(-0.3, 0.7, galDir.x));
+        dustTransmission = 1.0 - clamp(darkRift * 0.82, 0.0, 0.85);
+    }
 
-    // Unresolved dense micro-starfield dust embedded in the galactic band.
-    vec3 microCell = floor(rawGalDir * (isPixelStyle ? 150.0 : 250.0));
-    float microHash = hashCell(microCell);
-    float microStar = smoothstep(0.968, 0.998, microHash) * innerBand * dustTransmission;
+    float microStar = milkyWayMicroStars(rawGalDir, isPixelStyle) * innerBand * dustTransmission;
 
     float coreBoost = 0.65 + 0.55 * centerAlignment;
     float baseGlow = (broadBand * 0.19 + innerBand * 0.42 * mix(0.45, 1.30, brightKnots) + bulge * 0.40)

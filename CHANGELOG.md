@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.3.0 - 2026-11-24
+
+This update transforms The End into a purple *Eye of the Universe* cosmic vista,
+adds seasonal Perseids and Geminids meteor showers, introduces a subtle Spyglass
+astronomy HUD, brings dynamic lunar-phase night darkness and full orbital/ground
+solar eclipse effects, and optimizes CPU and GPU rendering with zero visual loss.
+
+### Added
+
+- **The End — Eye of the Universe:**
+  - Colossal swirling purple cosmic storm vortex overhead with domain-warped
+    volumetric clouds, radial quantum light shafts, internal electric-violet
+    lightning flashes, and a calm dark pupil with a silver-lavender rim.
+  - Deep cosmic purple atmospheric fog (`FogRendererMixin`) and luminous
+    amethyst-violet terrain lighting (`EndEffectsMixin`), replacing vanilla's
+    flat olive-green End lightmap while keeping torches and crystal flames crisp.
+  - Rare, silent 4-stage distant supernovae (red-giant swell, diffraction flash,
+    filamentary expanding shockwave nebula, and fading white-dwarf remnant) in
+    the starry outer void.
+- **Perseids & Geminids meteor showers:** Tied to real astronomical calendar
+  dates (`solarLongitude`), with up to 4 simultaneous meteors radiating from
+  their true celestial radiants in Perseus and Gemini with realistic shower
+  colors.
+- **Subtle Spyglass HUD (`SpyglassHud`):** Quietly displays the name and
+  astronomical details of the Sun, Moon phase & illumination, Solar System
+  planets (with apparent magnitude), 26 famous bright stars, active meteor
+  shower radiants, the Galactic Center, and The End's Eye of the Universe when
+  aiming a Spyglass at the sky.
+- **Dynamic lunar nights & solar eclipse world lighting (`OverworldEffectsMixin`):**
+  - Overworld nighttime ambient sky-light now darkens smoothly on moonless,
+    crescent, new-moon, rainy, or lunar-eclipse nights and stays clear and
+    silvery under a full moon, while keeping torches, lanterns, campfires,
+    lightning flashes, and deep caves 100% untouched.
+  - Daytime solar eclipses now smoothly darken Overworld terrain into deep
+    twilight, enhance the pearly-white solar corona with radial streamers, and
+    cast a physical sweeping **Moon umbra & penumbra shadow** across the orbital
+    planet's continents, oceans, cloud deck, and atmospheric limb from space.
+- **Independent feature toggles:** Added in-game toggles (and config options)
+  for **End Sky**, **Lunar Nights**, and **Spyglass HUD**.
+
+### Changed
+
+- **Performance optimizations (CPU & GPU, zero quality loss):**
+  - Cached all shader `Uniform` handles at registration, eliminating ~35 map
+    lookups per frame.
+  - Reduced the static sky sphere mesh by 4× (`32×24` vs. `64×48`) since all
+    sky, Milky Way, planet, and End shaders normalize directions per pixel.
+  - Cached equatorial planet Kepler orbits over 20-tick buckets (~95% fewer
+    orbital solver iterations), cached `LunarEclipse` with a fast phase
+    early-out, and cached biome lookups per 4×4×4 quart cell.
+  - Batched naked-eye planets and halos into shared draw calls with a
+    single-pass planet setup and a zero-allocation fast-path for celestial
+    horizon clipping.
+  - Added GPU early-outs across `clouds.fsh` (early distance fade discard),
+    `stars.fsh` (skip scintillation/extinction in space), `end_sky.fsh` (skip
+    occluded background nebula), `milky_way.fsh` (~60% sky pixels skipped via
+    galactic-latitude discard), and `planet.fsh` (skip atmosphere on opaque
+    orbital planet pixels, defer `atan()` until meteors are active, bound
+    eclipse corona math to 16° around the Sun, skip night-side surface micro
+    detail and ocean biome noise, and use screen-space cloud bump derivatives).
+- **Realistic white Sun in space:** Desaturates the Sun body and halo smoothly
+  to pure white as you leave the atmosphere.
+
+### Fixed
+
+- Fixed daytime stars popping in instantaneously around `Y ≈ 2089` (caused by
+  `RenderSystem.setShaderColor(1, 1, 1, 1)` overriding `ColorModulator` inside
+  `ShaderInstance.setDefaultUniforms()`); stars now fade in smoothly from
+  `Y = 900` to `Y = 4800`. Also fixed color modulation on Spyglass telescopic
+  planets.
+- Fixed clipped triangle/square procedural stars in The End and Milky Way dust
+  by replacing 3D cubic-voxel slicing with clean 2D cube-face projection
+  (`cubeFaceUV`).
+- Fixed subtle radial ray cutoff at the outer edge of The End vortex cone.
+
 ## 1.2.0 - 2026-11-23
 
 This update moves atmospheric rendering to the GPU, overhauls sunsets, planets,

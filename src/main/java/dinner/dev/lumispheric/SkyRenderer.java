@@ -9,8 +9,10 @@ import com.mojang.blaze3d.vertex.VertexBuffer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.renderer.DimensionSpecialEffects;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -22,9 +24,8 @@ import java.lang.reflect.Method;
 
 public final class SkyRenderer {
     private static final Logger LOGGER = LoggerFactory.getLogger("Lumispheric");
-    // Lightweight static sphere mesh uploaded once; all atmospheric shading runs per-fragment on GPU.
-    private static final int AZIMUTH_SEGMENTS = 64;
-    private static final int ELEVATION_SEGMENTS = 48;
+    private static final int AZIMUTH_SEGMENTS = 32;
+    private static final int ELEVATION_SEGMENTS = 24;
     private static final int AZIMUTH_STRIDE = AZIMUTH_SEGMENTS + 1;
     private static final int FOG_AZIMUTH_SAMPLES = 16;
     private static final int OVERWORLD_SEA_LEVEL = 63;
@@ -48,8 +49,15 @@ public final class SkyRenderer {
     private static final double MAX_PLANET_ROTATION_STEP = 512.0;
     private static final float SPACE_TRANSITION_START = 2048.0F - OVERWORLD_SEA_LEVEL;
     private static final float SPACE_TRANSITION_END = 8_000.0F - OVERWORLD_SEA_LEVEL;
-    private static final long METEOR_WINDOW_TICKS = 900L;
-    private static final float METEOR_DURATION_TICKS = 28.0F;
+
+    // Sporadic & meteor shower timing windows.
+    private static final long SPORADIC_METEOR_WINDOW_TICKS = 900L;
+    private static final float SPORADIC_METEOR_DURATION_TICKS = 28.0F;
+    private static final long[] SHOWER_SLOT_WINDOWS = { 170L, 211L, 257L, 307L };
+
+    // Eye of the Universe vortex direction in The End sky (towering high overhead toward north-northwest).
+    public static final Vector3f END_EYE_DIRECTION = new Vector3f(-0.22F, 0.82F, -0.53F).normalize();
+    private static final Vec3 END_FOG_COLOR = new Vec3(0.088, 0.038, 0.152);
 
     private static VertexBuffer skyBuffer;
     private static VertexBuffer starBuffer;
@@ -65,7 +73,25 @@ public final class SkyRenderer {
     private static boolean shadersActive;
     private static ClientLevel renderedLevel;
 
-    // Smoothly interpolated biome atmosphere traits to avoid sudden pops across biome borders.
+    // Reusable 4-slot meteor array (avoids per-frame array allocation).
+    private static final MeteorSlot[] ACTIVE_METEORS = new MeteorSlot[4];
+
+    // Per-frame astronomy snapshot cache shared across sky, stars, Sun, Moon, planets, clouds, and HUD.
+    private static ClientLevel cachedAstroLevel;
+    private static long cachedAstroDayTime = Long.MIN_VALUE;
+    private static float cachedAstroPartialTick = Float.NaN;
+    private static double cachedAstroLatitude = Double.NaN;
+    private static double cachedAstroYearLength = Double.NaN;
+    private static FrameAstronomy cachedAstro;
+
+    // Smoothly interpolated biome atmosphere traits + quart-cell biome lookup cache (eliminates per-frame Voronoi lookups).
+    private static final BlockPos.MutableBlockPos BIOME_QUERY_POS = new BlockPos.MutableBlockPos();
+    private static ClientLevel cachedBiomeLevel;
+    private static int cachedBiomeQuartX = Integer.MIN_VALUE;
+    private static int cachedBiomeQuartY = Integer.MIN_VALUE;
+    private static int cachedBiomeQuartZ = Integer.MIN_VALUE;
+    private static float cachedBiomeTemperature = 0.8F;
+    private static boolean cachedBiomeHasRain = true;
     private static float smoothedBiomeDust;
     private static float smoothedBiomeClearness;
     private static boolean biomeTraitsInitialized;
@@ -82,6 +108,20 @@ public final class SkyRenderer {
     private static float cachedFogMieIntensity = Float.NaN;
     private static int cachedFogBiomeBucket = Integer.MIN_VALUE;
     private static Vec3 cachedFogColor;
+
+    // Per-frame Overworld lunar night & solar eclipse lightmap cache (shared across all 256 lightmap texels).
+    private static ClientLevel cachedNightLightLevel;
+    private static long cachedNightLightDayTime = Long.MIN_VALUE;
+    private static float cachedNightLightPartialTick = Float.NaN;
+    private static int cachedNightLightFlash = Integer.MIN_VALUE;
+    private static int cachedNightLightRainBucket = Integer.MIN_VALUE;
+    private static double cachedNightLightLatitude = Double.NaN;
+    private static double cachedNightLightYearLength = Double.NaN;
+    private static boolean cachedNightLightEnabled = true;
+    private static float cachedNightLightWeight;
+    private static float cachedNightSkyScaleR = 1.0F;
+    private static float cachedNightSkyScaleG = 1.0F;
+    private static float cachedNightSkyScaleB = 1.0F;
 
     private SkyRenderer() {}
 
@@ -108,6 +148,12 @@ public final class SkyRenderer {
         planetRotationAroundX = 0.0;
         planetRotationAroundZ = 0.0;
         cachedStarRevision = Long.MIN_VALUE;
+        cachedAstroLevel = null;
+        cachedAstro = null;
+        cachedNightLightLevel = null;
+        cachedNightLightWeight = 0.0F;
+        cachedBiomeLevel = null;
+        cachedBiomeQuartX = Integer.MIN_VALUE;
         biomeTraitsInitialized = false;
         smoothedBiomeDust = 0.0F;
         smoothedBiomeClearness = 0.0F;
@@ -126,9 +172,191 @@ public final class SkyRenderer {
 
     public static boolean shouldRender(ClientLevel level) {
         return Config.enabled && level != null
-            && level.dimension() == net.minecraft.world.level.Level.OVERWORLD
-            && level.effects().skyType() == net.minecraft.client.renderer.DimensionSpecialEffects.SkyType.NORMAL
+            && level.dimension() == Level.OVERWORLD
+            && level.effects().skyType() == DimensionSpecialEffects.SkyType.NORMAL
             && !areShadersActive();
+    }
+
+    public static boolean shouldRenderEnd(ClientLevel level) {
+        return Config.enabled && Config.endSkyEnabled && level != null
+            && level.dimension() == Level.END
+            && level.effects().skyType() == DimensionSpecialEffects.SkyType.END
+            && !areShadersActive();
+    }
+
+    public static Vec3 endFogColor() {
+        return END_FOG_COLOR;
+    }
+
+    /**
+     * Modulates Overworld nighttime sky-light ambience based on real lunar presence, phase,
+     * lunar eclipse umbra, and rain overcast, while keeping block light (torches, lanterns, fire)
+     * and deep caves completely untouched.
+     */
+    public static void applyOverworldNightLightmap(
+        ClientLevel level,
+        float partialTick,
+        float blockLightRedFlicker,
+        int blockLightLevel,
+        int skyLightLevel,
+        Vector3f colors
+    ) {
+        if (skyLightLevel <= 0 || !shouldRender(level)) {
+            return;
+        }
+        updateNightLightmapCache(level, partialTick);
+        if (cachedNightLightWeight <= 0.001F) {
+            return;
+        }
+
+        // Smooth transition at cave entrances (pixelY 0..6) so underground lighting is unaffected.
+        float skyExposure = smoothstep(0.0F, 6.0F, (float) skyLightLevel);
+
+        // Separate pure block light from sky light so torches/lanterns stay 100% warm and bright.
+        float blockR = net.minecraft.client.renderer.LightTexture.getBrightness(level.dimensionType(), blockLightLevel)
+            * blockLightRedFlicker;
+        float blockG = blockR * ((blockR * 0.6F + 0.4F) * 0.6F + 0.4F);
+        float blockB = blockR * (blockR * blockR * 0.6F + 0.4F);
+
+        float skyR = Math.max(0.0F, colors.x - blockR);
+        float skyG = Math.max(0.0F, colors.y - blockG);
+        float skyB = Math.max(0.0F, colors.z - blockB);
+
+        float scaleR = mix(1.0F, cachedNightSkyScaleR, skyExposure);
+        float scaleG = mix(1.0F, cachedNightSkyScaleG, skyExposure);
+        float scaleB = mix(1.0F, cachedNightSkyScaleB, skyExposure);
+
+        colors.set(
+            Math.min(1.0F, blockR + skyR * scaleR),
+            Math.min(1.0F, blockG + skyG * scaleG),
+            Math.min(1.0F, blockB + skyB * scaleB)
+        );
+    }
+
+    private static void updateNightLightmapCache(ClientLevel level, float partialTick) {
+        long dayTime = level.getDayTime();
+        int flashTime = level.getSkyFlashTime();
+        float rain = Math.max(0.0F, Math.min(1.0F, level.getRainLevel(partialTick)));
+        int rainBucket = Math.round(rain * 100.0F);
+        double latitude = Config.latitude;
+        double yearLength = Config.yearLengthDays;
+        boolean lunarEnabled = Config.lunarNightDarkness;
+
+        if (cachedNightLightLevel == level
+            && cachedNightLightDayTime == dayTime
+            && Float.compare(cachedNightLightPartialTick, partialTick) == 0
+            && cachedNightLightFlash == flashTime
+            && cachedNightLightRainBucket == rainBucket
+            && Double.compare(cachedNightLightLatitude, latitude) == 0
+            && Double.compare(cachedNightLightYearLength, yearLength) == 0
+            && cachedNightLightEnabled == lunarEnabled) {
+            return;
+        }
+        cachedNightLightLevel = level;
+        cachedNightLightDayTime = dayTime;
+        cachedNightLightPartialTick = partialTick;
+        cachedNightLightFlash = flashTime;
+        cachedNightLightRainBucket = rainBucket;
+        cachedNightLightLatitude = latitude;
+        cachedNightLightYearLength = yearLength;
+        cachedNightLightEnabled = lunarEnabled;
+
+        // Never darken lightning flashes during thunderstorms.
+        if (flashTime > 0) {
+            cachedNightLightWeight = 0.0F;
+            return;
+        }
+
+        FrameAstronomy astro = frameAstronomy(level, partialTick);
+        float sunUp = (float) astro.sun().up();
+        float eclipse = astro.eclipseStrength() * (1.0F - rain * 0.45F);
+        float nightWeight = lunarEnabled ? (1.0F - smoothstep(-0.14F, 0.03F, sunUp)) : 0.0F;
+
+        if (nightWeight <= 0.001F && eclipse <= 0.005F) {
+            cachedNightLightWeight = 0.0F;
+            return;
+        }
+
+        float scaleR = 1.0F;
+        float scaleG = 1.0F;
+        float scaleB = 1.0F;
+
+        if (nightWeight > 0.001F) {
+            float moonUp = (float) astro.moon().up();
+            float moonAbove = smoothstep(-0.04F, 0.20F, moonUp);
+            float phase = Math.max(0.0F, Math.min(1.0F, astro.moonIllumination()));
+            // Real opposition surge: quarter/crescent moons are noticeably dimmer than a full moon.
+            float phaseBrightness = (float) Math.pow(phase, 1.35);
+            float lunarUmbra = astro.lunarEclipse().umbra();
+            float bloodMoon = lunarUmbra * moonAbove * (1.0F - rain * 0.7F);
+
+            float moonlight = moonAbove * phaseBrightness * (1.0F - 0.85F * lunarUmbra) * (1.0F - 0.45F * rain);
+
+            // Full moon (~0.96) keeps nights silvery and clear; moonless / new moon (~0.38) deepens
+            // the ambience atmospherically while remaining clearly playable.
+            float baseScale = mix(0.38F, 0.96F, moonlight);
+            float tintR = mix(0.90F, 0.94F, moonlight);
+            float tintG = mix(0.94F, 0.98F, moonlight);
+            float tintB = mix(1.08F, 1.06F, moonlight);
+
+            if (bloodMoon > 0.05F) {
+                tintR = mix(tintR, 1.18F, bloodMoon * 0.65F);
+                tintG = mix(tintG, 0.72F, bloodMoon * 0.65F);
+                tintB = mix(tintB, 0.70F, bloodMoon * 0.65F);
+            }
+
+            scaleR = mix(1.0F, baseScale * tintR, nightWeight);
+            scaleG = mix(1.0F, baseScale * tintG, nightWeight);
+            scaleB = mix(1.0F, baseScale * tintB, nightWeight);
+        }
+
+        // Daytime solar eclipse smoothly plunges Overworld terrain into eerie deep twilight
+        // while keeping torches, lanterns, and campfires warm and bright.
+        if (eclipse > 0.005F) {
+            float eclipseCurve = (float) Math.pow(eclipse, 1.15);
+            float eclipseDim = mix(1.0F, 0.24F, eclipseCurve);
+            scaleR *= eclipseDim * mix(1.0F, 0.94F, eclipseCurve);
+            scaleG *= eclipseDim * mix(1.0F, 0.92F, eclipseCurve);
+            scaleB *= eclipseDim * mix(1.0F, 1.08F, eclipseCurve);
+        }
+
+        cachedNightLightWeight = Math.max(nightWeight, eclipse);
+        cachedNightSkyScaleR = scaleR;
+        cachedNightSkyScaleG = scaleG;
+        cachedNightSkyScaleB = scaleB;
+    }
+
+    public static FrameAstronomy frameAstronomy(ClientLevel level, float partialTick) {
+        long dayTime = level.getDayTime();
+        double latitude = CelestialModel.latitudeRadians();
+        double yearLength = CelestialModel.configuredDaysPerYear();
+        if (cachedAstro != null
+            && cachedAstroLevel == level
+            && cachedAstroDayTime == dayTime
+            && Float.compare(cachedAstroPartialTick, partialTick) == 0
+            && Double.compare(cachedAstroLatitude, latitude) == 0
+            && Double.compare(cachedAstroYearLength, yearLength) == 0) {
+            return cachedAstro;
+        }
+        double astronomicalTime = dayTime + partialTick;
+        CelestialModel.Direction sun = CelestialModel.sunDirection(astronomicalTime, latitude);
+        CelestialModel.Direction moon = CelestialModel.moonDirection(astronomicalTime, latitude);
+        CelestialModel.Direction galacticNorth = CelestialModel.galacticNorthDirection(astronomicalTime, latitude);
+        CelestialModel.Direction galacticCenter = CelestialModel.galacticCenterDirection(astronomicalTime, latitude);
+        float moonIllum = CelestialModel.moonIllumination(astronomicalTime);
+        float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude);
+        CelestialModel.LunarEclipse lunarEclipse = CelestialModel.lunarEclipse(astronomicalTime, sun, moon);
+        CelestialModel.MeteorShower shower = CelestialModel.activeMeteorShower(astronomicalTime, latitude);
+        cachedAstro = new FrameAstronomy(
+            astronomicalTime, latitude, sun, moon, galacticNorth, galacticCenter,
+            moonIllum, eclipse, lunarEclipse, shower
+        );
+        cachedAstroLevel = level;
+        cachedAstroDayTime = dayTime;
+        cachedAstroPartialTick = partialTick;
+        cachedAstroLatitude = latitude;
+        cachedAstroYearLength = yearLength;
+        return cachedAstro;
     }
 
     public static void render(Matrix4f pose, Matrix4f projection, float partialTick, ClientLevel level) {
@@ -144,13 +372,9 @@ public final class SkyRenderer {
         updatePlanetRotation(cameraPosition.x, cameraPosition.z);
         updateBiomeTraits(level, cameraPosition, altitude);
 
-        double astronomicalTime = level.getDayTime() + partialTick;
-        double latitude = CelestialModel.latitudeRadians();
-        CelestialModel.Direction sun = CelestialModel.sunDirection(astronomicalTime, latitude);
-        CelestialModel.Direction moon = CelestialModel.moonDirection(astronomicalTime, latitude);
-        float sunUp = (float) sun.up();
-        float moonIllum = CelestialModel.moonIllumination(astronomicalTime);
-        float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude) * (1.0F - rain);
+        FrameAstronomy astro = frameAstronomy(level, partialTick);
+        float sunUp = (float) astro.sun().up();
+        float eclipse = astro.eclipseStrength() * (1.0F - rain);
         float horizonDip = horizonDip(altitude);
         float geomDip = geometricHorizonDip(altitude);
         float spaceBlend = spaceTransitionStrength(altitude);
@@ -159,7 +383,7 @@ public final class SkyRenderer {
         Twilight twilight = twilightPalette(sunUp, altitude);
         float aurora = auroraStrength(level, nightStrength, rain, spaceBlend, cameraPosition);
         float auroraHemisphere = Config.latitude >= 0.0 ? 1.0F : -1.0F;
-        Meteor meteor = currentMeteor(level, partialTick, rain, nightStrength, spaceBlend);
+        updateActiveMeteors(level, partialTick, rain, nightStrength, spaceBlend, astro.activeShower());
         float gameTimeSeconds = (float) (((level.getGameTime() % 72_000L) + partialTick) / 20.0);
         double cloudWindAngle = Math.IEEEremainder(
             (level.getGameTime() + (double) partialTick) * CLOUD_WIND_RADIANS_PER_TICK,
@@ -171,10 +395,10 @@ public final class SkyRenderer {
         RenderSystem.disableCull();
         RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
         ShaderInstance skyShader = LumisphericClient.getPlanetShader(
-            sun,
-            moon,
+            astro.sun(),
+            astro.moon(),
             sunUp,
-            moonIllum,
+            astro.moonIllumination(),
             rain,
             eclipse,
             horizonDip,
@@ -193,12 +417,7 @@ public final class SkyRenderer {
             aurora,
             auroraHemisphere,
             Config.pixelatedStyle ? 1.0F : 0.0F,
-            meteor != null ? meteor.startAzimuth() : 0.0F,
-            meteor != null ? meteor.startElevation() : 0.5F,
-            meteor != null ? meteor.azimuthDelta() : 0.0F,
-            meteor != null ? meteor.elevationDelta() : 0.0F,
-            meteor != null ? meteor.progress() : 0.0F,
-            meteor != null ? 1.0F : 0.0F,
+            ACTIVE_METEORS,
             gameTimeSeconds,
             (float) cloudWindAngle,
             (float) apparentPlanetRadius(altitude),
@@ -209,11 +428,11 @@ public final class SkyRenderer {
         skyBuffer.bind();
         skyBuffer.drawWithShader(pose, projection, skyShader);
 
-        float milkyWayStrength = milkyWayStrength(level, partialTick, sunUp, altitude, rain);
+        float milkyWayStrength = milkyWayStrength(astro, altitude, rain);
         if (milkyWayStrength > 0.001F) {
             ShaderInstance milkyWayShader = LumisphericClient.getMilkyWayShader(
-                CelestialModel.galacticNorthDirection(astronomicalTime, latitude),
-                CelestialModel.galacticCenterDirection(astronomicalTime, latitude),
+                astro.galacticNorth(),
+                astro.galacticCenter(),
                 milkyWayStrength,
                 geomDip,
                 spaceBlend,
@@ -233,6 +452,35 @@ public final class SkyRenderer {
         VertexBuffer.unbind();
         RenderSystem.enableCull();
         RenderSystem.disableBlend();
+    }
+
+    public static void renderEnd(Matrix4f pose, Matrix4f projection, float partialTick, ClientLevel level) {
+        ensureLevel(level);
+        if (skyBuffer == null) {
+            buildStaticSkySphere();
+        }
+
+        float gameTimeSeconds = (float) (((level.getGameTime() % 144_000L) + partialTick) / 20.0);
+        ShaderInstance endShader = LumisphericClient.getEndSkyShader(
+            END_EYE_DIRECTION,
+            gameTimeSeconds,
+            Config.pixelatedStyle ? 1.0F : 0.0F
+        );
+
+        RenderSystem.depthMask(false);
+        RenderSystem.enableBlend();
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+        try {
+            skyBuffer.bind();
+            skyBuffer.drawWithShader(pose, projection, endShader);
+        } finally {
+            VertexBuffer.unbind();
+            RenderSystem.enableCull();
+            RenderSystem.disableBlend();
+            RenderSystem.depthMask(true);
+        }
     }
 
     private static void buildStaticSkySphere() {
@@ -283,10 +531,28 @@ public final class SkyRenderer {
     }
 
     private static void updateBiomeTraits(ClientLevel level, Vec3 cameraPosition, float altitude) {
-        BlockPos pos = BlockPos.containing(cameraPosition);
-        Biome biome = level.getBiome(pos).value();
-        float temperature = biome.getBaseTemperature();
-        boolean hasRain = biome.hasPrecipitation();
+        int blockX = (int) Math.floor(cameraPosition.x);
+        int blockY = (int) Math.floor(cameraPosition.y);
+        int blockZ = (int) Math.floor(cameraPosition.z);
+        int quartX = blockX >> 2;
+        int quartY = blockY >> 2;
+        int quartZ = blockZ >> 2;
+        if (cachedBiomeLevel != level
+            || cachedBiomeQuartX != quartX
+            || cachedBiomeQuartY != quartY
+            || cachedBiomeQuartZ != quartZ) {
+            BIOME_QUERY_POS.set(blockX, blockY, blockZ);
+            Biome biome = level.getBiome(BIOME_QUERY_POS).value();
+            cachedBiomeTemperature = biome.getBaseTemperature();
+            cachedBiomeHasRain = biome.hasPrecipitation();
+            cachedBiomeLevel = level;
+            cachedBiomeQuartX = quartX;
+            cachedBiomeQuartY = quartY;
+            cachedBiomeQuartZ = quartZ;
+        }
+
+        float temperature = cachedBiomeTemperature;
+        boolean hasRain = cachedBiomeHasRain;
         float targetDust = !hasRain && temperature >= 0.95F
             ? smoothstep(0.95F, 1.85F, temperature)
             : 0.0F;
@@ -323,7 +589,6 @@ public final class SkyRenderer {
         float red = (float) Math.exp(-0.045F * opticalDepth);
         float green = (float) Math.exp(-0.145F * opticalDepth);
         float blue = (float) Math.exp(-0.34F * opticalDepth);
-        // Normalize against red so the disk stays bright while shifting warmly to gold/orange/red near the horizon.
         float r = 1.0F;
         float g = mix(Math.min(1.0F, green / Math.max(red, 0.05F)), 1.0F, spaceBlend);
         float b = mix(Math.min(1.0F, blue / Math.max(red, 0.05F)), 1.0F, spaceBlend);
@@ -364,18 +629,15 @@ public final class SkyRenderer {
     }
 
     public static Vec3 horizonColor(ClientLevel level, float partialTick, float azimuth, double cameraY) {
-        double astronomicalTime = level.getDayTime() + partialTick;
+        FrameAstronomy astro = frameAstronomy(level, partialTick);
         float rain = weatherStrength(level, cameraY, partialTick);
-        double latitude = CelestialModel.latitudeRadians();
-        CelestialModel.Direction sun = CelestialModel.sunDirection(astronomicalTime, latitude);
-        CelestialModel.Direction moon = CelestialModel.moonDirection(astronomicalTime, latitude);
-        float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude) * (1.0F - rain);
+        float eclipse = astro.eclipseStrength() * (1.0F - rain);
         float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
-        Twilight twilight = twilightPalette((float) sun.up(), altitude);
+        Twilight twilight = twilightPalette((float) astro.sun().up(), altitude);
         float horizonDip = horizonDip(altitude);
         return sampleHorizonAtmosphere(
-            -horizonDip, azimuth, rain, twilight, sun, moon, horizonDip,
-            CelestialModel.moonIllumination(astronomicalTime), eclipse, altitude
+            -horizonDip, azimuth, rain, twilight, astro.sun(), astro.moon(), horizonDip,
+            astro.moonIllumination(), eclipse, altitude
         );
     }
 
@@ -421,13 +683,10 @@ public final class SkyRenderer {
             cachedFogBiomeBucket = biomeBucket;
         }
 
-        // Subtle, camera-smooth 18% directional blend toward the look azimuth during twilight so looking into a sunset
-        // blends naturally with distant terrain without causing jarring shifts while turning.
         if (lookDirection != null && (lookDirection.x * lookDirection.x + lookDirection.z * lookDirection.z) > 1.0e-4) {
-            double astronomicalTime = level.getDayTime() + fogPartialTick;
-            float sunUp = (float) CelestialModel.sunDirection(astronomicalTime, CelestialModel.latitudeRadians()).up();
+            FrameAstronomy astro = frameAstronomy(level, fogPartialTick);
             float alt = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
-            float twilightWeight = twilightPalette(sunUp, alt).strength() * 0.18F;
+            float twilightWeight = twilightPalette((float) astro.sun().up(), alt).strength() * 0.18F;
             if (twilightWeight > 0.005F) {
                 float lookAzimuth = (float) Math.atan2(lookDirection.z, lookDirection.x);
                 Vec3 directional = horizonColor(level, fogPartialTick, lookAzimuth, cameraY);
@@ -465,19 +724,19 @@ public final class SkyRenderer {
         float skyElevation = elevation + horizonDip + horizonDrop;
         float geometricDip = geometricHorizonDip(altitude);
         float horizonSharpness = mix(
-            2.8F + smoothedBiomeClearness * 0.45F - smoothedBiomeDust * 0.35F,
+            2.7F + smoothedBiomeClearness * 0.45F - smoothedBiomeDust * 0.35F,
             12.0F,
             spaceBlend
         );
         float horizon = (float) Math.exp(-Math.abs(skyElevation) * horizonSharpness);
 
-        float zenithR = mix(mix(0.15F, 0.09F, smoothedBiomeClearness * 0.45F), 0.20F, smoothedBiomeDust * 0.22F);
-        float zenithG = mix(mix(0.28F, 0.21F, smoothedBiomeClearness * 0.45F), 0.33F, smoothedBiomeDust * 0.22F);
-        float zenithB = mix(mix(0.64F, 0.56F, smoothedBiomeClearness * 0.45F), 0.62F, smoothedBiomeDust * 0.22F);
+        float zenithR = mix(mix(0.13F, 0.07F, smoothedBiomeClearness * 0.45F), 0.19F, smoothedBiomeDust * 0.22F);
+        float zenithG = mix(mix(0.27F, 0.19F, smoothedBiomeClearness * 0.45F), 0.33F, smoothedBiomeDust * 0.22F);
+        float zenithB = mix(mix(0.66F, 0.56F, smoothedBiomeClearness * 0.45F), 0.63F, smoothedBiomeDust * 0.22F);
 
-        float horizonRed = mix(mix(0.60F, 0.14F, spaceBlend), 0.73F, smoothedBiomeDust * 0.22F * (1.0F - spaceBlend));
-        float horizonGreen = mix(mix(0.74F, 0.30F, spaceBlend), 0.72F, smoothedBiomeDust * 0.22F * (1.0F - spaceBlend));
-        float horizonBlue = mix(mix(0.89F, 0.62F, spaceBlend), 0.67F, smoothedBiomeDust * 0.22F * (1.0F - spaceBlend));
+        float horizonRed = mix(mix(0.60F, 0.12F, spaceBlend), 0.75F, smoothedBiomeDust * 0.22F * (1.0F - spaceBlend));
+        float horizonGreen = mix(mix(0.76F, 0.30F, spaceBlend), 0.73F, smoothedBiomeDust * 0.22F * (1.0F - spaceBlend));
+        float horizonBlue = mix(mix(0.92F, 0.68F, spaceBlend), 0.67F, smoothedBiomeDust * 0.22F * (1.0F - spaceBlend));
 
         float red = mix(zenithR, horizonRed, horizon);
         float green = mix(zenithG, horizonGreen, horizon);
@@ -492,111 +751,121 @@ public final class SkyRenderer {
         float nightBlend = astronomicalNightStrength(sunY, altitude);
         float horizonNight = mix(nightBlend, 1.0F - smoothstep(-0.16F, 0.22F, sunDot), spaceBlend);
 
-        red = mix(red, mix(0.005F, 0.016F, horizon), horizonNight);
-        green = mix(green, mix(0.008F, 0.024F, horizon), horizonNight);
-        blue = mix(blue, mix(0.018F, 0.040F, horizon), horizonNight);
+        red = mix(red, mix(0.004F, 0.015F, horizon), horizonNight);
+        green = mix(green, mix(0.007F, 0.024F, horizon), horizonNight);
+        blue = mix(blue, mix(0.017F, 0.042F, horizon), horizonNight);
 
-        float atmosphereHeight = Math.max(0.0F, skyElevation) / 0.045F;
-        float upperAtmosphere = spaceBlend * (float) Math.exp(-atmosphereHeight * atmosphereHeight);
-        red = mix(red, mix(0.065F, 0.006F, horizonNight), upperAtmosphere * 0.82F);
-        green = mix(green, mix(0.16F, 0.008F, horizonNight), upperAtmosphere * 0.82F);
-        blue = mix(blue, mix(0.42F, 0.020F, horizonNight), upperAtmosphere * 0.82F);
+        if (spaceBlend > 0.001F) {
+            float atmosphereHeight = Math.max(0.0F, skyElevation) / 0.045F;
+            float upperAtmosphere = spaceBlend * (float) Math.exp(-atmosphereHeight * atmosphereHeight);
+            red = mix(red, mix(0.06F, 0.005F, horizonNight), upperAtmosphere * 0.85F);
+            green = mix(green, mix(0.17F, 0.008F, horizonNight), upperAtmosphere * 0.85F);
+            blue = mix(blue, mix(0.48F, 0.022F, horizonNight), upperAtmosphere * 0.85F);
+        }
 
         float moonAbove = smoothstep(-0.08F, 0.14F, moonY);
-        float moonHalo = (float) Math.pow(Math.max(moonDot, 0.0F), 10.0) * 0.036F;
-        float moonAmbient = (0.004F + 0.006F * horizon) * moonAbove;
         float lunarFactor = moonIllumination * horizonNight * (1.0F - rain * 0.85F) * (1.0F - spaceBlend * 0.75F);
-        float lunarTotal = (moonHalo * moonAbove + moonAmbient) * lunarFactor;
-        red += 0.42F * lunarTotal;
-        green += 0.62F * lunarTotal;
-        blue += 0.96F * lunarTotal;
+        if (lunarFactor > 0.001F && moonAbove > 0.001F) {
+            float moonHalo = (float) Math.pow(Math.max(moonDot, 0.0F), 10.0) * 0.036F;
+            float moonAmbient = (0.004F + 0.006F * horizon) * moonAbove;
+            float lunarTotal = (moonHalo * moonAbove + moonAmbient) * lunarFactor;
+            red += 0.42F * lunarTotal;
+            green += 0.62F * lunarTotal;
+            blue += 0.96F * lunarTotal;
+        }
 
-        float sunAngle = (float) Math.acos(sunDot);
         float rayleighPhase = 0.75F * (1.0F + sunDot * sunDot);
         float rayleighScatter = (1.0F - horizonNight) * (1.0F - rain) * rayleighPhase * (0.35F + 0.65F * horizon);
         red += rayleighScatter * 0.012F;
-        green += rayleighScatter * 0.035F;
-        blue += rayleighScatter * 0.085F;
+        green += rayleighScatter * 0.036F;
+        blue += rayleighScatter * 0.090F;
 
         float twilightLight = twilight.strength() * (1.0F - rain * 0.75F);
-        float sunwardHorizon = (float) Math.exp(-(sunAngle * sunAngle) / 0.88F);
-        float tighterSunward = (float) Math.exp(-(sunAngle * sunAngle) / 0.30F);
-        float lowHorizonBand = (float) Math.exp(-Math.abs(skyElevation) * mix(5.2F, 13.0F, spaceBlend));
-        float wideHorizonBand = (float) Math.exp(-Math.abs(skyElevation) * mix(2.4F, 9.0F, spaceBlend));
+        if (twilightLight > 0.001F) {
+            float sunAngle = (float) Math.acos(sunDot);
+            float sunwardHorizon = (float) Math.exp(-(sunAngle * sunAngle) / 0.88F);
+            float tighterSunward = (float) Math.exp(-(sunAngle * sunAngle) / 0.30F);
+            float lowHorizonBand = (float) Math.exp(-Math.abs(skyElevation) * mix(5.2F, 13.0F, spaceBlend));
+            float wideHorizonBand = (float) Math.exp(-Math.abs(skyElevation) * mix(2.4F, 9.0F, spaceBlend));
 
-        float flankR = mix(0.88F, 0.58F, twilight.blueHour());
-        float flankG = mix(0.46F, 0.32F, twilight.blueHour());
-        float flankB = mix(0.48F, 0.56F, twilight.blueHour());
-        float solR = mix(1.00F, 0.95F, twilight.blueHour() * 0.72F);
-        float solG = mix(0.54F, 0.30F, twilight.blueHour() * 0.72F);
-        float solB = mix(0.18F, 0.22F, twilight.blueHour() * 0.72F);
-        float sweepMix = 0.22F + 0.78F * sunwardHorizon;
-        float sweepWeight = Math.min(0.92F, wideHorizonBand * twilightLight * (0.48F + 0.52F * sunwardHorizon) * 0.84F);
-        red = mix(red, mix(flankR, mix(twilight.red(), solR, 0.55F), sweepMix), sweepWeight);
-        green = mix(green, mix(flankG, mix(twilight.green(), solG, 0.55F), sweepMix), sweepWeight);
-        blue = mix(blue, mix(flankB, mix(twilight.blue(), solB, 0.55F), sweepMix), sweepWeight);
+            float flankR = mix(0.88F, 0.58F, twilight.blueHour());
+            float flankG = mix(0.46F, 0.32F, twilight.blueHour());
+            float flankB = mix(0.48F, 0.56F, twilight.blueHour());
+            float solR = mix(1.00F, 0.95F, twilight.blueHour() * 0.72F);
+            float solG = mix(0.54F, 0.30F, twilight.blueHour() * 0.72F);
+            float solB = mix(0.18F, 0.22F, twilight.blueHour() * 0.72F);
+            float sweepMix = 0.22F + 0.78F * sunwardHorizon;
+            float sweepWeight = Math.min(0.92F, wideHorizonBand * twilightLight * (0.48F + 0.52F * sunwardHorizon) * 0.84F);
+            red = mix(red, mix(flankR, mix(twilight.red(), solR, 0.55F), sweepMix), sweepWeight);
+            green = mix(green, mix(flankG, mix(twilight.green(), solG, 0.55F), sweepMix), sweepWeight);
+            blue = mix(blue, mix(flankB, mix(twilight.blue(), solB, 0.55F), sweepMix), sweepWeight);
 
-        float blazingBand = Math.min(0.90F, lowHorizonBand * tighterSunward * twilightLight * 0.85F);
-        red = mix(red, mix(1.00F, 0.98F, twilight.blueHour() * 0.85F), blazingBand);
-        green = mix(green, mix(0.76F, 0.42F, twilight.blueHour() * 0.85F), blazingBand);
-        blue = mix(blue, mix(0.32F, 0.16F, twilight.blueHour() * 0.85F), blazingBand);
+            float blazingBand = Math.min(0.90F, lowHorizonBand * tighterSunward * twilightLight * 0.85F);
+            red = mix(red, mix(1.00F, 0.98F, twilight.blueHour() * 0.85F), blazingBand);
+            green = mix(green, mix(0.76F, 0.42F, twilight.blueHour() * 0.85F), blazingBand);
+            blue = mix(blue, mix(0.32F, 0.16F, twilight.blueHour() * 0.85F), blazingBand);
 
-        float sunElevation = (float) Math.asin(Math.max(-1.0F, Math.min(1.0F, sunY)));
-        float apparentSunElev = sunElevation + geometricDip;
-        float antisolarDist = (float) Math.PI - sunAngle;
-        float antisolarMask = (float) Math.exp(-(antisolarDist * antisolarDist) / 0.62F) * twilightLight * (1.0F - spaceBlend);
-        float shadowTop = Math.max(0.025F, Math.min(0.24F, 0.025F + Math.max(-apparentSunElev, 0.0F) * 1.55F));
-        float earthShadow = (1.0F - smoothstep(shadowTop - 0.042F, shadowTop + 0.042F, skyElevation))
-            * smoothstep(-0.18F, 0.01F, skyElevation)
-            * antisolarMask * smoothstep(-0.03F, 0.12F, -apparentSunElev + 0.04F) * 0.66F;
-        red = mix(red, 0.06F, earthShadow);
-        green = mix(green, 0.09F, earthShadow);
-        blue = mix(blue, 0.21F, earthShadow);
+            float sunElevation = (float) Math.asin(Math.max(-1.0F, Math.min(1.0F, sunY)));
+            float apparentSunElev = sunElevation + geometricDip;
+            float antisolarDist = (float) Math.PI - sunAngle;
+            float antisolarMask = (float) Math.exp(-(antisolarDist * antisolarDist) / 0.62F) * twilightLight * (1.0F - spaceBlend);
+            float shadowTop = Math.max(0.025F, Math.min(0.24F, 0.025F + Math.max(-apparentSunElev, 0.0F) * 1.55F));
+            float earthShadow = (1.0F - smoothstep(shadowTop - 0.042F, shadowTop + 0.042F, skyElevation))
+                * smoothstep(-0.18F, 0.01F, skyElevation)
+                * antisolarMask * smoothstep(-0.03F, 0.12F, -apparentSunElev + 0.04F) * 0.66F;
+            red = mix(red, 0.06F, earthShadow);
+            green = mix(green, 0.09F, earthShadow);
+            blue = mix(blue, 0.21F, earthShadow);
 
-        float wideGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.32F) * twilightLight;
-        float coreGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.065F) * twilightLight;
-        red += mix(0.42F, 0.32F, twilight.blueHour()) * wideGlow * 0.65F
-            + mix(0.58F, 0.42F, twilight.blueHour()) * coreGlow * 0.85F;
-        green += mix(0.20F, 0.10F, twilight.blueHour()) * wideGlow * 0.65F
-            + mix(0.40F, 0.18F, twilight.blueHour()) * coreGlow * 0.85F;
-        blue += mix(0.06F, 0.08F, twilight.blueHour()) * wideGlow * 0.65F
-            + mix(0.16F, 0.08F, twilight.blueHour()) * coreGlow * 0.85F;
+            float wideGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.32F) * twilightLight;
+            float coreGlow = (float) Math.exp(-(sunAngle * sunAngle) / 0.065F) * twilightLight;
+            red += mix(0.42F, 0.32F, twilight.blueHour()) * wideGlow * 0.65F
+                + mix(0.58F, 0.42F, twilight.blueHour()) * coreGlow * 0.85F;
+            green += mix(0.20F, 0.10F, twilight.blueHour()) * wideGlow * 0.65F
+                + mix(0.40F, 0.18F, twilight.blueHour()) * coreGlow * 0.85F;
+            blue += mix(0.06F, 0.08F, twilight.blueHour()) * wideGlow * 0.65F
+                + mix(0.16F, 0.08F, twilight.blueHour()) * coreGlow * 0.85F;
+        }
 
-        float mieAsymmetry = mix(0.78F, 0.72F, smoothedBiomeDust * 0.4F);
+        float mieAsymmetry = mix(0.79F, 0.73F, smoothedBiomeDust * 0.4F);
         float mieDenom = 1.0F + mieAsymmetry * mieAsymmetry - 2.0F * mieAsymmetry * sunDot;
         float mieRatio = (1.0F - mieAsymmetry) * (1.0F - mieAsymmetry) / Math.max(mieDenom, 1.0e-4F);
         float miePhase = mieRatio * (float) Math.sqrt(mieRatio);
-        float mieStrength = Math.min(0.85F, miePhase * Config.mieIntensity * (1.0F + smoothedBiomeDust * 0.45F)
-            * (1.0F - horizonNight) * (1.0F - rain * 0.75F) * 0.16F * (0.35F + 0.65F * twilight.strength()));
-        red = mix(red, 0.99F, mieStrength);
-        green = mix(green, mix(0.92F, twilight.green() + 0.20F, twilight.strength()), mieStrength);
-        blue = mix(blue, mix(0.82F, twilight.blue() + 0.20F, twilight.strength()), mieStrength);
+        float mieStrength = Math.min(0.88F, miePhase * Config.mieIntensity * (1.0F + smoothedBiomeDust * 0.45F)
+            * (1.0F - horizonNight) * (1.0F - rain * 0.75F) * 0.18F * (0.35F + 0.65F * twilight.strength()));
+        red = mix(red, 1.04F, mieStrength);
+        green = mix(green, mix(0.95F, twilight.green() + 0.24F, twilight.strength()), mieStrength);
+        blue = mix(blue, mix(0.84F, twilight.blue() + 0.18F, twilight.strength()), mieStrength);
 
-        float luminance = red * 0.2126F + green * 0.7152F + blue * 0.0722F;
-        red = mix(red, luminance * 0.88F, rain * 0.62F);
-        green = mix(green, luminance * 0.94F, rain * 0.48F);
-        blue = mix(blue, Math.min(1.0F, luminance * 1.04F + 0.045F), rain * 0.42F);
+        if (rain > 0.001F) {
+            float luminance = red * 0.2126F + green * 0.7152F + blue * 0.0722F;
+            red = mix(red, luminance * 0.88F, rain * 0.62F);
+            green = mix(green, luminance * 0.94F, rain * 0.48F);
+            blue = mix(blue, Math.min(1.0F, luminance * 1.04F + 0.045F), rain * 0.42F);
+        }
 
         if (eclipse > 0.001F) {
-            float eclipseDarkening = eclipse * 0.78F;
+            float eclipseDarkening = eclipse * 0.85F;
             red *= 1.0F - eclipseDarkening;
             green *= 1.0F - eclipseDarkening;
             blue *= 1.0F - eclipseDarkening;
-            float eclipseHorizon = (float) Math.exp(-Math.abs(skyElevation) * 7.5F) * eclipse * (1.0F - spaceBlend);
-            red = mix(red, 0.55F, eclipseHorizon * 0.45F);
-            green = mix(green, 0.30F, eclipseHorizon * 0.45F);
-            blue = mix(blue, 0.16F, eclipseHorizon * 0.45F);
+            float eclipseHorizon = (float) Math.exp(-Math.abs(skyElevation) * 7.2F) * eclipse * (1.0F - spaceBlend);
+            red = mix(red, 0.68F, eclipseHorizon * 0.56F);
+            green = mix(green, 0.34F, eclipseHorizon * 0.56F);
+            blue = mix(blue, 0.16F, eclipseHorizon * 0.56F);
         }
 
-        float spaceRed = mix(0.002F, 0.001F, horizonNight);
-        float spaceGreen = mix(0.004F, 0.002F, horizonNight);
-        float spaceBlue = mix(0.012F, 0.006F, horizonNight);
-        float apparentElevation = elevation + horizonDip + horizonDrop * 0.5F;
-        float spaceFacing = smoothstep(0.02F, 0.14F, Math.abs(apparentElevation));
-        float spaceDarkening = spaceBlend * spaceFacing;
-        red = mix(red, spaceRed, spaceDarkening);
-        green = mix(green, spaceGreen, spaceDarkening);
-        blue = mix(blue, spaceBlue, spaceDarkening);
+        if (spaceBlend > 0.001F) {
+            float spaceRed = mix(0.002F, 0.001F, horizonNight);
+            float spaceGreen = mix(0.004F, 0.002F, horizonNight);
+            float spaceBlue = mix(0.012F, 0.006F, horizonNight);
+            float apparentElevation = elevation + horizonDip + horizonDrop * 0.5F;
+            float spaceFacing = smoothstep(0.02F, 0.14F, Math.abs(apparentElevation));
+            float spaceDarkening = spaceBlend * spaceFacing;
+            red = mix(red, spaceRed, spaceDarkening);
+            green = mix(green, spaceGreen, spaceDarkening);
+            blue = mix(blue, spaceBlue, spaceDarkening);
+        }
 
         return new Vec3(clamp01(red), clamp01(green), clamp01(blue));
     }
@@ -672,17 +941,13 @@ public final class SkyRenderer {
         return smoothstep(celestialHorizonLevel(cameraY), celestialHorizonFadeTop(cameraY), localUp);
     }
 
-    private static float milkyWayStrength(
-        ClientLevel level, float partialTick, float sunUp, float altitude, float rain
-    ) {
-        double astronomicalTime = level.getDayTime() + partialTick;
-        float nightBlend = astronomicalNightStrength(sunUp, altitude);
-        float moonIllumination = CelestialModel.moonIllumination(astronomicalTime);
+    public static float milkyWayStrength(FrameAstronomy astro, float altitude, float rain) {
+        float nightBlend = astronomicalNightStrength((float) astro.sun().up(), altitude);
         float spaceBlend = spaceTransitionStrength(altitude);
         float highAltitudeVisibility = smoothstep(1_024.0F, 3_600.0F, altitude);
         float milkyWayVisibility = Math.max(nightBlend, highAltitudeVisibility);
         float airDensity = (float) Math.exp(-altitude / 8_500.0);
-        float moonlightFade = 1.0F - moonIllumination * 0.30F * (1.0F - spaceBlend);
+        float moonlightFade = 1.0F - astro.moonIllumination() * 0.30F * (1.0F - spaceBlend);
         return milkyWayVisibility * (1.0F - rain * 0.92F) * moonlightFade
             * (1.0F - airDensity * 0.08F) * Config.milkyWayBrightness;
     }
@@ -692,24 +957,27 @@ public final class SkyRenderer {
     }
 
     public static float astronomicalStarBrightness(ClientLevel level, float partialTick, double cameraY) {
-        double astronomicalTime = level.getDayTime() + partialTick;
-        double latitude = CelestialModel.latitudeRadians();
+        FrameAstronomy astro = frameAstronomy(level, partialTick);
         float altitude = (float) Math.max(0.0, cameraY - OVERWORLD_SEA_LEVEL);
-        float sunUp = (float) CelestialModel.sunDirection(astronomicalTime, latitude).up();
+        float sunUp = (float) astro.sun().up();
         float nightBlend = astronomicalNightStrength(sunUp, altitude);
         float spaceBlend = spaceTransitionStrength(altitude);
         float spaceStarBlend = smoothstep(
-            2_048.0F - OVERWORLD_SEA_LEVEL,
-            4_096.0F - OVERWORLD_SEA_LEVEL,
+            900.0F - OVERWORLD_SEA_LEVEL,
+            4_800.0F - OVERWORLD_SEA_LEVEL,
             altitude
         );
-        float eclipse = CelestialModel.eclipseStrength(astronomicalTime, latitude)
-            * (1.0F - weatherStrength(level, cameraY, partialTick));
+        // Smooth quadratic ramp so bright stars emerge gradually as the sky darkens into space (never popping).
+        float spaceStars = spaceStarBlend * spaceStarBlend * 0.92F;
+        float rain = weatherStrength(level, cameraY, partialTick);
+        float eclipse = astro.eclipseStrength() * (1.0F - rain);
         float twilightStars = (1.0F - smoothstep(-0.12F, 0.06F, sunUp)) * mix(0.22F, 0.34F, spaceBlend);
         float eclipseStars = eclipse * 0.65F;
-        return Math.max(Math.max(nightBlend * 0.85F, spaceStarBlend * 0.85F), Math.max(twilightStars, eclipseStars))
+        float moonlightDim = 1.0F - 0.14F * astro.moonIllumination() * (1.0F - spaceBlend);
+        float visibility = moonlightDim * (1.0F - rain * 0.95F);
+        return Math.max(Math.max(nightBlend * 0.85F, spaceStars), Math.max(twilightStars, eclipseStars))
             * Config.starBrightness
-            * starVisibility(level, partialTick);
+            * visibility;
     }
 
     public static void renderStars(Matrix4f pose, Matrix4f projection, ClientLevel level, float partialTick) {
@@ -748,7 +1016,8 @@ public final class SkyRenderer {
             GlStateManager.SourceFactor.ONE,
             GlStateManager.DestFactor.ZERO
         );
-        RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+        // RenderSystem.setShaderColor drives ShaderInstance's default ColorModulator during drawWithShader!
+        RenderSystem.setShaderColor(brightness, brightness, brightness, 1.0F);
         try {
             starBuffer.bind();
             starBuffer.drawWithShader(
@@ -780,14 +1049,6 @@ public final class SkyRenderer {
         return CelestialModel.eclipseStrength(level.getDayTime(), CelestialModel.latitudeRadians());
     }
 
-    public static float starVisibility(ClientLevel level, float partialTick) {
-        double cameraY = Minecraft.getInstance().gameRenderer.getMainCamera().getPosition().y;
-        float rain = weatherStrength(level, cameraY, partialTick);
-        float spaceBlend = spaceTransition(cameraY);
-        float moonlightDim = 1.0F - 0.14F * moonIllumination(level) * (1.0F - spaceBlend);
-        return moonlightDim * (1.0F - rain * 0.95F);
-    }
-
     private static float auroraStrength(
         ClientLevel level, float night, float rain, float spaceBlend, Vec3 cameraPosition
     ) {
@@ -798,8 +1059,7 @@ public final class SkyRenderer {
         double absLat = Math.abs(Config.latitude);
         float latitudeFactor = smoothstep(50.0F, 68.0F, (float) absLat);
 
-        BlockPos position = BlockPos.containing(cameraPosition);
-        float temperature = level.getBiome(position).value().getBaseTemperature();
+        float temperature = cachedBiomeTemperature;
         float coldBiomeFactor = 1.0F - smoothstep(-0.2F, 0.25F, temperature);
 
         float locationEligibility = Math.max(latitudeFactor, coldBiomeFactor * 0.85F);
@@ -809,7 +1069,6 @@ public final class SkyRenderer {
 
         long day = Math.floorDiv(level.getDayTime(), 24000L);
         int dayHash = Math.floorMod(mixDay(day), 100);
-        // More frequent at high polar latitudes (~1 in 3 nights), rarer in cold mid-latitude biomes (~1 in 7 nights).
         int chancePercent = Math.round(mix(14.0F, 38.0F, latitudeFactor));
         if (dayHash >= chancePercent) {
             return 0.0F;
@@ -820,24 +1079,107 @@ public final class SkyRenderer {
             * (1.0F - rain * 2.5F) * (1.0F - spaceBlend) * 0.78F;
     }
 
-    private static Meteor currentMeteor(
-        ClientLevel level, float partialTick, float rain, float night, float spaceBlend
+    private static void updateActiveMeteors(
+        ClientLevel level,
+        float partialTick,
+        float rain,
+        float night,
+        float spaceBlend,
+        CelestialModel.MeteorShower shower
     ) {
+        for (int i = 0; i < 4; i++) {
+            ACTIVE_METEORS[i] = null;
+        }
         if (rain > 0.25F || (night < 0.55F && spaceBlend < 0.5F)) {
-            return null;
+            return;
         }
 
         double continuousTicks = level.getGameTime() + partialTick;
-        long window = Math.floorDiv((long) Math.floor(continuousTicks), METEOR_WINDOW_TICKS);
-        int seed = mixDay(window ^ (Math.floorDiv(level.getDayTime(), 24000L) * 31L));
-        // Roughly 1-2 shooting stars per clear night (~30% per 45-second window).
+        long day = Math.floorDiv(level.getDayTime(), 24000L);
+
+        // Slot 0: Sporadic background meteors year-round.
+        ACTIVE_METEORS[0] = sporadicMeteor(continuousTicks, day);
+
+        // If Perseids or Geminids are active and their radiant is near or above the horizon, populate up to 4
+        // simultaneous meteors radiating outward in perspective from the real celestial radiant!
+        if (shower != null && shower.strength() > 0.14F && shower.radiant().up() > -0.18) {
+            Vector3f radiantVec = new Vector3f(
+                (float) shower.radiant().east(),
+                (float) shower.radiant().up(),
+                (float) shower.radiant().south()
+            ).normalize();
+            Vector3f refUp = Math.abs(radiantVec.y) > 0.95F
+                ? new Vector3f(0.0F, 0.0F, 1.0F)
+                : new Vector3f(0.0F, 1.0F, 0.0F);
+            Vector3f tangentA = new Vector3f(refUp).cross(radiantVec).normalize();
+            Vector3f tangentB = new Vector3f(radiantVec).cross(tangentA).normalize();
+
+            // Perseids are faster & crisp; Geminids are slightly slower with richer golden-amber trails.
+            float duration = shower.typeIndex() == 1 ? 22.0F : 30.0F;
+            int activeChance = Math.round(mix(22.0F, 76.0F, shower.strength()));
+
+            for (int slot = 0; slot < 4; slot++) {
+                if (slot == 0 && ACTIVE_METEORS[0] != null) {
+                    continue;
+                }
+                long windowLen = SHOWER_SLOT_WINDOWS[slot];
+                long window = Math.floorDiv((long) Math.floor(continuousTicks), windowLen);
+                int seed = mixDay(window * 131L + slot * 997L + day * 37L);
+                if (Math.floorMod(seed, 100) >= activeChance) {
+                    continue;
+                }
+                float offset = ((seed >>> 4) & 0xFF) / 255.0F * (windowLen - duration - 16.0F);
+                float localTick = (float) (continuousTicks - window * windowLen);
+                float progress = (localTick - offset) / duration;
+                if (progress < 0.0F || progress > 1.0F) {
+                    continue;
+                }
+
+                // Random outward bearing around the radiant (biased slightly upward when radiant is low).
+                float bearing = ((seed >>> 12) & 0x3FF) / 1023.0F * (float) (Math.PI * 2.0);
+                float startSep = (float) Math.toRadians(14.0 + (((seed >>> 22) & 0x3F) / 63.0) * 38.0);
+                float streakLen = (float) Math.toRadians(14.0 + (((seed >>> 28) & 0xF) / 15.0) * 18.0);
+                float endSep = startSep + streakLen;
+
+                Vector3f outDir = new Vector3f(tangentA).mul((float) Math.cos(bearing))
+                    .add(new Vector3f(tangentB).mul((float) Math.sin(bearing)))
+                    .normalize();
+                Vector3f startPos = new Vector3f(radiantVec).mul((float) Math.cos(startSep))
+                    .add(new Vector3f(outDir).mul((float) Math.sin(startSep)))
+                    .normalize();
+                Vector3f endPos = new Vector3f(radiantVec).mul((float) Math.cos(endSep))
+                    .add(new Vector3f(outDir).mul((float) Math.sin(endSep)))
+                    .normalize();
+
+                // Skip meteors that start or end far below the horizon.
+                if (startPos.y < 0.10F && endPos.y < 0.10F) {
+                    continue;
+                }
+
+                float startEl = (float) Math.asin(Math.max(-1.0F, Math.min(1.0F, startPos.y)));
+                float endEl = (float) Math.asin(Math.max(-1.0F, Math.min(1.0F, endPos.y)));
+                float startAz = (float) Math.atan2(startPos.z, startPos.x);
+                float endAz = (float) Math.atan2(endPos.z, endPos.x);
+                float azDelta = wrapRadiansFloat(endAz - startAz);
+
+                ACTIVE_METEORS[slot] = new MeteorSlot(
+                    startAz, startEl, azDelta, endEl - startEl, progress, shower.typeIndex()
+                );
+            }
+        }
+    }
+
+    private static MeteorSlot sporadicMeteor(double continuousTicks, long day) {
+        long window = Math.floorDiv((long) Math.floor(continuousTicks), SPORADIC_METEOR_WINDOW_TICKS);
+        int seed = mixDay(window ^ (day * 31L));
         if (Math.floorMod(seed, 10) >= 3) {
             return null;
         }
 
-        float offsetInWindow = ((seed >>> 4) & 0xFF) / 255.0F * (METEOR_WINDOW_TICKS - METEOR_DURATION_TICKS - 40.0F);
-        float localTick = (float) (continuousTicks - window * METEOR_WINDOW_TICKS);
-        float progress = (localTick - offsetInWindow) / METEOR_DURATION_TICKS;
+        float offsetInWindow = ((seed >>> 4) & 0xFF) / 255.0F
+            * (SPORADIC_METEOR_WINDOW_TICKS - SPORADIC_METEOR_DURATION_TICKS - 40.0F);
+        float localTick = (float) (continuousTicks - window * SPORADIC_METEOR_WINDOW_TICKS);
+        float progress = (localTick - offsetInWindow) / SPORADIC_METEOR_DURATION_TICKS;
         if (progress < 0.0F || progress > 1.0F) {
             return null;
         }
@@ -845,9 +1187,19 @@ public final class SkyRenderer {
         float startAzimuth = ((seed >>> 16) & 0xFFFF) / 65535.0F * (float) (Math.PI * 2.0);
         float startElevation = 0.30F + ((seed >>> 8) & 0xFF) / 255.0F * 0.65F;
         float azimuthDelta = (((seed >>> 24) & 0xFF) / 255.0F - 0.5F) * 0.52F;
-        // Meteors generally streak slightly downward across the sky.
         float elevationDelta = -0.10F - (((seed >>> 2) & 0x3F) / 63.0F) * 0.24F;
-        return new Meteor(startAzimuth, startElevation, azimuthDelta, elevationDelta, progress);
+        return new MeteorSlot(startAzimuth, startElevation, azimuthDelta, elevationDelta, progress, 0.0F);
+    }
+
+    private static float wrapRadiansFloat(float angle) {
+        float twoPi = (float) (Math.PI * 2.0);
+        while (angle > Math.PI) {
+            angle -= twoPi;
+        }
+        while (angle < -Math.PI) {
+            angle += twoPi;
+        }
+        return angle;
     }
 
     private static int mixDay(long day) {
@@ -857,8 +1209,22 @@ public final class SkyRenderer {
         return (int) (value ^ (value >>> 31));
     }
 
-    private record Meteor(
-        float startAzimuth, float startElevation, float azimuthDelta, float elevationDelta, float progress
+    public record MeteorSlot(
+        float startAzimuth, float startElevation, float azimuthDelta, float elevationDelta,
+        float progress, float colorType
+    ) {}
+
+    public record FrameAstronomy(
+        double astronomicalTime,
+        double latitude,
+        CelestialModel.Direction sun,
+        CelestialModel.Direction moon,
+        CelestialModel.Direction galacticNorth,
+        CelestialModel.Direction galacticCenter,
+        float moonIllumination,
+        float eclipseStrength,
+        CelestialModel.LunarEclipse lunarEclipse,
+        CelestialModel.MeteorShower activeShower
     ) {}
 
     private static float twilightAmount(float apparentSunElevation, float altitudeBlend) {

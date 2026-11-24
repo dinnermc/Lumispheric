@@ -131,8 +131,9 @@ void main() {
             discard;
         }
         float core = 1.0 - smoothstep(0.65, 1.0, maxCoord);
-        vec3 col = mix(ColorModulator.rgb, vec3(1.0), 0.32 * core);
-        fragColor = vec4(col * vertexColor.rgb, vertexColor.a * ColorModulator.a * (0.85 + 0.15 * core));
+        vec3 baseCol = ColorModulator.rgb * vertexColor.rgb;
+        vec3 col = mix(baseCol, vec3(1.0), 0.32 * core);
+        fragColor = vec4(col, vertexColor.a * ColorModulator.a * (0.85 + 0.15 * core));
         return;
     }
 
@@ -145,7 +146,7 @@ void main() {
         if (glow <= 0.001) {
             discard;
         }
-        fragColor = vec4(ColorModulator.rgb * glow, glow * vertexColor.a * ColorModulator.a);
+        fragColor = vec4(ColorModulator.rgb * vertexColor.rgb * glow, glow * vertexColor.a * ColorModulator.a);
         return;
     }
 
@@ -273,6 +274,12 @@ void main() {
         );
     } else {
         float solarEclipse = StyleParams.w;
+        float spaceBlend = clamp(StyleParams.z, 0.0, 1.0);
+        // Outside Earth's atmosphere, the Sun shifts from Minecraft's warm yellow texture to pure white.
+        if (spaceBlend > 0.001) {
+            float peak = max(bodyColor.r, max(bodyColor.g, bodyColor.b));
+            bodyColor.rgb = mix(bodyColor.rgb, vec3(peak), spaceBlend * 0.96);
+        }
         if (solarEclipse > 0.01) {
             vec2 sunDisk = (texCoord0 - 0.5) / 0.125;
             float dist = pixelatedStyle > 0.5

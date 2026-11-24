@@ -1,8 +1,10 @@
 package dinner.dev.lumispheric.mixin;
 
+import com.mojang.blaze3d.shaders.FogShape;
 import com.mojang.blaze3d.systems.RenderSystem;
 import dinner.dev.lumispheric.SkyRenderer;
 import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.FogRenderer;
 import net.minecraft.world.level.material.FogType;
@@ -29,7 +31,20 @@ abstract class FogRendererMixin {
     private static void lumispheric$matchHorizonFog(
         Camera camera, float partialTick, ClientLevel level, int renderDistance, float darkenWorldAmount, CallbackInfo callback
     ) {
-        if (!SkyRenderer.shouldRender(level) || camera.getFluidInCamera() != FogType.NONE) {
+        if (camera.getFluidInCamera() != FogType.NONE) {
+            return;
+        }
+
+        if (SkyRenderer.shouldRenderEnd(level)) {
+            Vec3 endColor = SkyRenderer.endFogColor();
+            fogRed = (float) endColor.x;
+            fogGreen = (float) endColor.y;
+            fogBlue = (float) endColor.z;
+            RenderSystem.clearColor(fogRed, fogGreen, fogBlue, 0.0F);
+            return;
+        }
+
+        if (!SkyRenderer.shouldRender(level)) {
             return;
         }
 
@@ -41,5 +56,33 @@ abstract class FogRendererMixin {
         fogGreen = (float) color.y;
         fogBlue = (float) color.z;
         RenderSystem.clearColor(fogRed, fogGreen, fogBlue, 0.0F);
+    }
+
+    @Inject(method = "setupFog", at = @At("RETURN"))
+    private static void lumispheric$addEndAtmosphericDepth(
+        Camera camera,
+        FogRenderer.FogMode fogMode,
+        float farPlaneDistance,
+        boolean shouldCreateFog,
+        float partialTick,
+        CallbackInfo callback
+    ) {
+        if (fogMode != FogRenderer.FogMode.FOG_TERRAIN || camera.getFluidInCamera() != FogType.NONE) {
+            return;
+        }
+        ClientLevel level = Minecraft.getInstance().level;
+        if (!SkyRenderer.shouldRenderEnd(level)) {
+            return;
+        }
+
+        // Gentle cosmic violet aerial perspective so obsidian towers and outer islands gain depth
+        // without obscuring close combat (preserves closer fog from Blindness/Darkness via Math.min).
+        float targetStart = Math.max(24.0F, farPlaneDistance * 0.24F);
+        float targetEnd = Math.max(targetStart + 32.0F, farPlaneDistance * 0.98F);
+        if (RenderSystem.getShaderFogStart() > targetStart) {
+            RenderSystem.setShaderFogStart(targetStart);
+            RenderSystem.setShaderFogEnd(Math.min(RenderSystem.getShaderFogEnd(), targetEnd));
+            RenderSystem.setShaderFogShape(FogShape.SPHERE);
+        }
     }
 }

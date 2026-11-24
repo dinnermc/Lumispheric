@@ -13,12 +13,29 @@ public final class CelestialModel {
     private static final double LUNAR_ANGULAR_RADIUS = Math.toRadians(0.26);
     private static final double EARTH_UMBRA_ANGULAR_RADIUS = Math.toRadians(0.70);
     private static final double EARTH_PENUMBRA_ANGULAR_RADIUS = Math.toRadians(1.22);
+    private static final double TWO_PI = Math.PI * 2.0;
+
     private static final Equatorial GALACTIC_NORTH = new Equatorial(
         Math.toRadians(192.85948), Math.toRadians(27.12825)
     );
     private static final Equatorial GALACTIC_CENTER = new Equatorial(
         Math.toRadians(266.4051), Math.toRadians(-28.936175)
     );
+
+    // Major real annual meteor showers keyed to exact ecliptic solar longitude (0 deg = March equinox).
+    // Perseids peak ~Aug 12 (solar longitude 140 deg), radiant in Perseus (RA 3.2h, Dec +58 deg).
+    // Geminids peak ~Dec 14 (solar longitude 262 deg), radiant in Gemini (RA 7.5h, Dec +32 deg).
+    private static final ShowerDefinition[] METEOR_SHOWERS = {
+        new ShowerDefinition(
+            "perseids", 1, 140.0, 5.8,
+            new Equatorial(Math.toRadians(48.0), Math.toRadians(58.0))
+        ),
+        new ShowerDefinition(
+            "geminids", 2, 262.0, 4.8,
+            new Equatorial(Math.toRadians(112.5), Math.toRadians(32.0))
+        )
+    };
+
     private static final PlanetElements EARTH_ELEMENTS = new PlanetElements(
         "Earth", 0.0, 0.0, 282.9404, 1.000000, 0.016709,
         356.0470, 0.9856002585,
@@ -49,7 +66,12 @@ public final class CelestialModel {
             0.008606, 260.5944, 0.005995147, 3.0173e-5, -2.55e-7,
             -6.027e-6, 2.15e-9, 0.48F, 0.66F, 1.00F, 0.062F, -6.87)
     };
-    private static final double TWO_PI = Math.PI * 2.0;
+
+    // Equatorial orbital positions change negligibly over 1 second (20 ticks), so cache them to avoid
+    // running 64 Kepler iterations per frame.
+    private static long cachedPlanetBucket = Long.MIN_VALUE;
+    private static double cachedPlanetYearLength = Double.NaN;
+    private static Planet[] cachedEquatorialPlanets;
 
     private CelestialModel() {}
 
@@ -59,6 +81,11 @@ public final class CelestialModel {
 
     public static double configuredDaysPerYear() {
         return Math.max(16.0, Config.yearLengthDays);
+    }
+
+    public static double solarLongitudeDegrees(double dayTime) {
+        double deg = Math.toDegrees(solarLongitude(dayTime));
+        return wrapDegrees(deg);
     }
 
     public static Direction sunDirection(double dayTime, double latitude) {
@@ -80,6 +107,27 @@ public final class CelestialModel {
 
     public static Direction galacticCenterDirection(double dayTime, double latitude) {
         return localDirection(GALACTIC_CENTER, dayTime, latitude);
+    }
+
+    public static Direction equatorialToLocal(double rightAscensionRad, double declinationRad, double dayTime, double latitude) {
+        return localDirection(new Equatorial(rightAscensionRad, declinationRad), dayTime, latitude);
+    }
+
+    public static MeteorShower activeMeteorShower(double dayTime, double latitude) {
+        double sunLonDeg = solarLongitudeDegrees(dayTime);
+        MeteorShower best = null;
+        for (ShowerDefinition def : METEOR_SHOWERS) {
+            double delta = Math.abs(shortestAngleDegrees(sunLonDeg, def.peakSolarLonDeg));
+            if (delta > def.widthDeg * 2.5) {
+                continue;
+            }
+            float strength = (float) Math.exp(-Math.pow(delta / def.widthDeg, 2.0));
+            if (strength > 0.12F && (best == null || strength > best.strength())) {
+                Direction radiant = localDirection(def.radiant, dayTime, latitude);
+                best = new MeteorShower(def.id, def.typeIndex, strength, radiant);
+            }
+        }
+        return best;
     }
 
     public static BillboardBasis billboardBasis(Direction direction) {
@@ -140,9 +188,6 @@ public final class CelestialModel {
         Vector3f light = new Vector3f(
             (float) lightWorldDir.east(), (float) lightWorldDir.up(), (float) lightWorldDir.south()
         ).normalize();
-        // +X = quad right (u increases), +Y = quad down (v increases -> flip to match top-down UV or shader),
-        // Wait: in shader uv=(0,0) is top-left (+up, -right), uv=(1,1) is bottom-right (-up, +right).
-        // So quadPosition = uv * 2 - 1 has +X = right, +Y = -up, +Z = toward observer (-forward).
         return new Vector3f(
             light.dot(basis.right()),
             -light.dot(basis.up()),
@@ -168,6 +213,8 @@ public final class CelestialModel {
         }
         return phase;
     }
+
+    public static final LunarEclipse NO_LUNAR_ECLIPSE = new LunarEclipse(0.0F, 0.0F, 0.0F, 0.0F);
 
     public static float eclipseStrength(double dayTime, double latitude) {
         double cycle = lunarCycle(dayTime);
@@ -205,12 +252,26 @@ public final class CelestialModel {
     }
 
     public static LunarEclipse lunarEclipse(double dayTime, double latitude) {
-        Direction sun = sunDirection(dayTime, latitude);
-        Direction moon = moonDirection(dayTime, latitude);
+        double cycle = lunarCycle(dayTime);
+        if (cycle > 0.045 && cycle < 0.955) {
+            return NO_LUNAR_ECLIPSE;
+        }
+        return lunarEclipse(dayTime, sunDirection(dayTime, latitude), moonDirection(dayTime, latitude));
+    }
+
+    public static LunarEclipse lunarEclipse(double dayTime, Direction sun, Direction moon) {
+        double cycle = lunarCycle(dayTime);
+        if (cycle > 0.045 && cycle < 0.955) {
+            return NO_LUNAR_ECLIPSE;
+        }
         double dot = -sun.east * moon.east - sun.up * moon.up - sun.south * moon.south;
         double separation = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
-        double longitude = solarLongitude(dayTime) + Math.PI + TWO_PI * lunarCycle(dayTime);
-        double longitudeOffset = wrapRadians(longitude - solarLongitude(dayTime) - Math.PI);
+        if (separation > EARTH_PENUMBRA_ANGULAR_RADIUS + LUNAR_ANGULAR_RADIUS) {
+            return NO_LUNAR_ECLIPSE;
+        }
+        double solarLon = solarLongitude(dayTime);
+        double longitude = solarLon + Math.PI + TWO_PI * cycle;
+        double longitudeOffset = wrapRadians(longitude - solarLon - Math.PI);
         double nodeLongitude = Math.toRadians(125.04452 - 0.0529539 * scaledYearDays(dayTime));
         double eclipticLatitude = Math.asin(
             Math.sin(LUNAR_INCLINATION) * Math.sin(longitude - nodeLongitude)
@@ -243,7 +304,16 @@ public final class CelestialModel {
     }
 
     public static Planet[] planetEquatorialDirections(double dayTime) {
-        double days = scaledYearDays(dayTime) - REFERENCE_DAY_OF_YEAR;
+        long bucket = Math.floorDiv((long) Math.floor(dayTime), 20L);
+        double yearLen = configuredDaysPerYear();
+        if (cachedEquatorialPlanets != null
+            && bucket == cachedPlanetBucket
+            && Double.compare(yearLen, cachedPlanetYearLength) == 0) {
+            return cachedEquatorialPlanets;
+        }
+
+        double bucketTime = bucket * 20.0 + 10.0;
+        double days = scaledYearDays(bucketTime) - REFERENCE_DAY_OF_YEAR;
         double[] earthPosition = planetEclipticPosition(EARTH_ELEMENTS, days);
         Planet[] planets = new Planet[8];
         PlanetElements[] elements = PLANET_ELEMENTS;
@@ -264,14 +334,12 @@ public final class CelestialModel {
             double cosPhase = (heliocentric[0] * x + heliocentric[1] * y + heliocentric[2] * z)
                 / (sunDist * earthDist);
             double phaseAngleDeg = Math.toDegrees(Math.acos(Math.max(-1.0, Math.min(1.0, cosPhase))));
-            // Approximate apparent visual magnitude V = H + 5*log10(r*delta) + phase term
             double phaseTerm = 0.015 * phaseAngleDeg + 0.00012 * phaseAngleDeg * phaseAngleDeg;
             float apparentMagnitude = (float) (
                 planet.absoluteMagnitude + 5.0 * Math.log10(sunDist * earthDist) + phaseTerm
             );
             float intensity = Math.max(0.08F, Math.min(1.0F, (6.5F - apparentMagnitude) / 10.5F));
 
-            // Direction from planet to Sun in equatorial coordinates for realistic phase lighting
             Equatorial sunFromPlanetEq = eclipticVectorToEquatorial(
                 -heliocentric[0], -heliocentric[1], -heliocentric[2]
             );
@@ -290,23 +358,27 @@ public final class CelestialModel {
                 apparentMagnitude
             );
         }
+        cachedEquatorialPlanets = planets;
+        cachedPlanetBucket = bucket;
+        cachedPlanetYearLength = yearLen;
         return planets;
     }
 
     public static PlanetDirection[] planetDirections(double dayTime, double latitude) {
         Planet[] planets = planetEquatorialDirections(dayTime);
         PlanetDirection[] directions = new PlanetDirection[planets.length - 1];
+        double siderealTime = localSiderealTime(dayTime);
+        double sinLatitude = Math.sin(latitude);
+        double cosLatitude = Math.cos(latitude);
         int index = 0;
         for (Planet planet : planets) {
             if (planet.name().equals("Earth")) {
                 continue;
             }
-            Equatorial equatorial = new Equatorial(planet.rightAscension(), planet.declination());
-            Equatorial sunFromPlanet = new Equatorial(planet.sunRightAscension(), planet.sunDeclination());
             directions[index++] = new PlanetDirection(
                 planet,
-                localDirection(equatorial, dayTime, latitude),
-                localDirection(sunFromPlanet, dayTime, latitude)
+                localDirectionFast(planet.rightAscension(), planet.declination(), siderealTime, sinLatitude, cosLatitude),
+                localDirectionFast(planet.sunRightAscension(), planet.sunDeclination(), siderealTime, sinLatitude, cosLatitude)
             );
         }
         return directions;
@@ -339,11 +411,19 @@ public final class CelestialModel {
     }
 
     private static Direction localDirection(Equatorial equatorial, double dayTime, double latitude) {
-        double hourAngle = localSiderealTime(dayTime) - equatorial.rightAscension;
-        double sinLatitude = Math.sin(latitude);
-        double cosLatitude = Math.cos(latitude);
-        double cosDeclination = Math.cos(equatorial.declination);
-        double sinDeclination = Math.sin(equatorial.declination);
+        return localDirectionFast(
+            equatorial.rightAscension, equatorial.declination,
+            localSiderealTime(dayTime), Math.sin(latitude), Math.cos(latitude)
+        );
+    }
+
+    private static Direction localDirectionFast(
+        double rightAscension, double declination,
+        double siderealTime, double sinLatitude, double cosLatitude
+    ) {
+        double hourAngle = siderealTime - rightAscension;
+        double cosDeclination = Math.cos(declination);
+        double sinDeclination = Math.sin(declination);
         double cosHourAngle = Math.cos(hourAngle);
         double sinHourAngle = Math.sin(hourAngle);
         return new Direction(
@@ -394,8 +474,7 @@ public final class CelestialModel {
             ) / (1.0 - eccentricity * Math.cos(eccentricAnomaly));
         }
 
-        double xv = planet.semiMajorAxis
-            * (Math.cos(eccentricAnomaly) - eccentricity);
+        double xv = planet.semiMajorAxis * (Math.cos(eccentricAnomaly) - eccentricity);
         double yv = planet.semiMajorAxis
             * Math.sqrt(1.0 - eccentricity * eccentricity)
             * Math.sin(eccentricAnomaly);
@@ -418,6 +497,11 @@ public final class CelestialModel {
 
     private static double wrapDegrees(double degrees) {
         return degrees - Math.floor(degrees / 360.0) * 360.0;
+    }
+
+    private static double shortestAngleDegrees(double a, double b) {
+        double diff = wrapDegrees(a - b + 180.0) - 180.0;
+        return diff;
     }
 
     private static double wrapRadians(double angle) {
@@ -468,6 +552,8 @@ public final class CelestialModel {
 
     public record QuadVertex(float x, float y, float z, float u, float v, float localUp) {}
 
+    public record MeteorShower(String id, int typeIndex, float strength, Direction radiant) {}
+
     public record Planet(
         String name,
         double rightAscension,
@@ -485,6 +571,10 @@ public final class CelestialModel {
     public record PlanetDirection(Planet planet, Direction direction, Direction sunDirectionFromPlanet) {}
 
     private record Equatorial(double rightAscension, double declination) {}
+
+    private record ShowerDefinition(
+        String id, int typeIndex, double peakSolarLonDeg, double widthDeg, Equatorial radiant
+    ) {}
 
     private record PlanetElements(
         String name,

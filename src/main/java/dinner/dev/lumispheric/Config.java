@@ -36,6 +36,15 @@ public final class Config {
     private static final ModConfigSpec.BooleanValue PIXELATED_STYLE = BUILDER
         .comment("Use Minecraft-style pixelated shading for spyglass planets, Milky Way, auroras, and high-altitude planet.")
         .define("pixelatedStyle", true);
+    private static final ModConfigSpec.BooleanValue END_SKY_ENABLED = BUILDER
+        .comment("Enable Lumispheric's Eye of the Universe sky, cosmic purple ambience, and fog in The End.")
+        .define("endSkyEnabled", true);
+    private static final ModConfigSpec.BooleanValue LUNAR_NIGHT_DARKNESS = BUILDER
+        .comment("Modulate Overworld nighttime darkness by real Moon phase/presence and darken terrain during solar eclipses.")
+        .define("lunarNightDarkness", true);
+    private static final ModConfigSpec.BooleanValue SPYGLASS_HUD_ENABLED = BUILDER
+        .comment("Show a subtle HUD label when aiming a Spyglass at celestial bodies.")
+        .define("spyglassHudEnabled", true);
 
     static final ModConfigSpec SPEC = BUILDER.build();
 
@@ -49,6 +58,9 @@ public final class Config {
     public static float celestialSize = 0.65F;
     public static double yearLengthDays = 48.0;
     public static boolean pixelatedStyle = true;
+    public static boolean endSkyEnabled = true;
+    public static boolean lunarNightDarkness = true;
+    public static boolean spyglassHudEnabled = true;
 
     private Config() {}
 
@@ -103,6 +115,21 @@ public final class Config {
         pixelatedStyle = value;
     }
 
+    public static void setEndSkyEnabled(boolean value) {
+        END_SKY_ENABLED.set(value);
+        endSkyEnabled = value;
+    }
+
+    public static void setLunarNightDarkness(boolean value) {
+        LUNAR_NIGHT_DARKNESS.set(value);
+        lunarNightDarkness = value;
+    }
+
+    public static void setSpyglassHudEnabled(boolean value) {
+        SPYGLASS_HUD_ENABLED.set(value);
+        spyglassHudEnabled = value;
+    }
+
     public static void save() {
         SPEC.save();
     }
@@ -122,5 +149,8 @@ public final class Config {
         celestialSize = CELESTIAL_SIZE.get().floatValue();
         yearLengthDays = YEAR_LENGTH_DAYS.get();
         pixelatedStyle = PIXELATED_STYLE.get();
+        endSkyEnabled = END_SKY_ENABLED.get();
+        lunarNightDarkness = LUNAR_NIGHT_DARKNESS.get();
+        spyglassHudEnabled = SPYGLASS_HUD_ENABLED.get();
     }
 }

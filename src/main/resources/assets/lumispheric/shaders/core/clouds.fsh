@@ -27,7 +27,9 @@ void main() {
         discard;
     }
     color.a *= clamp(CloudDeckOpacity, 0.0, 1.0);
-    if (color.a <= 0.01) {
+    // Early-discard faded distant cloud pixels before computing twilight, moonlight, and storm lighting.
+    float fade = 1.0 - smoothstep(FogStart, FogEnd, vertexDistance);
+    if (color.a * fade <= 0.01) {
         discard;
     }
 
@@ -76,13 +78,7 @@ void main() {
 
     vec3 stormTint = mix(vec3(0.88, 0.91, 0.96), vec3(0.82, 0.86, 0.93), thunder);
     color.rgb *= mix(vec3(1.0), stormTint, overcast);
-    color.a = min(color.a * (1.0 + rain * 0.12 + thunder * 0.02), 1.0);
-
-    float fade = 1.0 - smoothstep(FogStart, FogEnd, vertexDistance);
-    color.a *= fade;
-    if (color.a <= 0.01) {
-        discard;
-    }
+    color.a = min(color.a * (1.0 + rain * 0.12 + thunder * 0.02), 1.0) * fade;
 
     fragColor = color;
 }

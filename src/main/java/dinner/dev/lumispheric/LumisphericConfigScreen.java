@@ -15,7 +15,7 @@ import java.util.function.DoubleFunction;
 public final class LumisphericConfigScreen extends Screen {
     private static final double MIN_YEAR_DAYS = 16.0;
     private static final double MAX_YEAR_DAYS = 365.2422;
-    private static final int LAYOUT_HEIGHT = 200;
+    private static final int LAYOUT_HEIGHT = 222;
     private static final int COLUMN_GAP = 10;
 
     private final Screen parent;
@@ -146,12 +146,46 @@ public final class LumisphericConfigScreen extends Screen {
             button -> {
                 Config.setEnabled(true);
                 Config.setLatitude(40.0);
+                Config.setEndSkyEnabled(true);
+                Config.setLunarNightDarkness(true);
+                Config.setSpyglassHudEnabled(true);
                 Profile.VANILLA_PLUS.apply();
                 this.rebuildWidgets();
             }
         )
             .tooltip(Tooltip.create(Component.translatable("config.lumispheric.tooltip.reset")))
             .bounds(this.rightColumnX, rowStartY + rowStep * 4, this.columnWidth, 18)
+            .build());
+
+        // Feature toggle row: End Sky, Lunar Nights, Spyglass HUD.
+        int featureRowY = rowStartY + rowStep * 5;
+        int featureGap = 4;
+        int featureWidth = (contentWidth - featureGap * 2) / 3;
+        int thirdX = contentLeft + (featureWidth + featureGap) * 2;
+        int thirdWidth = (contentLeft + contentWidth) - thirdX;
+
+        this.addRenderableWidget(Button.builder(endSkyLabel(), button -> {
+            Config.setEndSkyEnabled(!Config.endSkyEnabled);
+            button.setMessage(endSkyLabel());
+        })
+            .tooltip(Tooltip.create(Component.translatable("config.lumispheric.tooltip.end_sky")))
+            .bounds(contentLeft, featureRowY, featureWidth, 18)
+            .build());
+
+        this.addRenderableWidget(Button.builder(lunarNightsLabel(), button -> {
+            Config.setLunarNightDarkness(!Config.lunarNightDarkness);
+            button.setMessage(lunarNightsLabel());
+        })
+            .tooltip(Tooltip.create(Component.translatable("config.lumispheric.tooltip.lunar_nights")))
+            .bounds(contentLeft + featureWidth + featureGap, featureRowY, featureWidth, 18)
+            .build());
+
+        this.addRenderableWidget(Button.builder(spyglassHudLabel(), button -> {
+            Config.setSpyglassHudEnabled(!Config.spyglassHudEnabled);
+            button.setMessage(spyglassHudLabel());
+        })
+            .tooltip(Tooltip.create(Component.translatable("config.lumispheric.tooltip.spyglass_hud")))
+            .bounds(thirdX, featureRowY, thirdWidth, 18)
             .build());
 
         // Footer Done button.
@@ -224,6 +258,24 @@ public final class LumisphericConfigScreen extends Screen {
             Config.pixelatedStyle
                 ? "config.lumispheric.pixelated_style.minecraft"
                 : "config.lumispheric.pixelated_style.realistic"
+        );
+    }
+
+    private static Component endSkyLabel() {
+        return Component.translatable(
+            Config.endSkyEnabled ? "config.lumispheric.end_sky.on" : "config.lumispheric.end_sky.off"
+        );
+    }
+
+    private static Component lunarNightsLabel() {
+        return Component.translatable(
+            Config.lunarNightDarkness ? "config.lumispheric.lunar_nights.on" : "config.lumispheric.lunar_nights.off"
+        );
+    }
+
+    private static Component spyglassHudLabel() {
+        return Component.translatable(
+            Config.spyglassHudEnabled ? "config.lumispheric.spyglass_hud.on" : "config.lumispheric.spyglass_hud.off"
         );
     }
 
