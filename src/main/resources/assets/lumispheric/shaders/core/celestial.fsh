@@ -262,16 +262,18 @@ void main() {
         float isHalo = smoothstep(0.98, 1.15, boxDist);
         bodyColor.rgb *= mix(diskPhaseLighting, haloLighting, isHalo);
 
-        // Real-proportion lunar eclipse umbra & penumbra shadow.
-        float shadowDistance = length(moonDiskPos - LunarShadowOffset);
-        float umbra = 1.0 - smoothstep(2.56, 2.82, shadowDistance);
-        float penumbra = 1.0 - smoothstep(4.45, 4.95, shadowDistance);
-        bodyColor.rgb *= 1.0 - max(penumbra - umbra, 0.0) * 0.25;
-        bodyColor.rgb = mix(
-            bodyColor.rgb,
-            bodyColor.rgb * vec3(0.58, 0.13, 0.045),
-            umbra
-        );
+        // Real-proportion lunar eclipse umbra & penumbra shadow (skip when Earth's shadow is far from the Moon).
+        if (dot(LunarShadowOffset, LunarShadowOffset) < 144.0) {
+            float shadowDistance = length(moonDiskPos - LunarShadowOffset);
+            float umbra = 1.0 - smoothstep(2.56, 2.82, shadowDistance);
+            float penumbra = 1.0 - smoothstep(4.45, 4.95, shadowDistance);
+            bodyColor.rgb *= 1.0 - max(penumbra - umbra, 0.0) * 0.25;
+            bodyColor.rgb = mix(
+                bodyColor.rgb,
+                bodyColor.rgb * vec3(0.58, 0.13, 0.045),
+                umbra
+            );
+        }
     } else {
         float solarEclipse = StyleParams.w;
         float spaceBlend = clamp(StyleParams.z, 0.0, 1.0);

@@ -214,7 +214,8 @@ public final class CelestialModel {
         return phase;
     }
 
-    public static final LunarEclipse NO_LUNAR_ECLIPSE = new LunarEclipse(0.0F, 0.0F, 0.0F, 0.0F);
+    // Far outside Earth's penumbra/umbra radius (4.95 lunar radii) so non-eclipse nights never tint the Moon red.
+    public static final LunarEclipse NO_LUNAR_ECLIPSE = new LunarEclipse(0.0F, 0.0F, 1000.0F, 1000.0F);
 
     public static float eclipseStrength(double dayTime, double latitude) {
         double cycle = lunarCycle(dayTime);

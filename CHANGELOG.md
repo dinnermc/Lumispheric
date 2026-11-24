@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.1 - 2026-11-24
+
+Hotfix for 1.3.0.
+
+### Fixed
+
+- Fixed the Moon always appearing red (permanently in lunar eclipse umbra) on
+  non-eclipse nights due to `NO_LUNAR_ECLIPSE` using a `(0, 0)` shadow offset
+  instead of placing Earth's shadow outside the lunar disk.
+
 ## 1.3.0 - 2026-11-24
 
 This update transforms The End into a purple *Eye of the Universe* cosmic vista,

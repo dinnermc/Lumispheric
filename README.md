@@ -15,7 +15,7 @@
   <p>A custom procedural sky, astronomy system, and cosmic horizon for the <b>Overworld</b> and <b>The End</b>.</p>
 </div>
 
-**Latest release: 1.3.0** — download it from
+**Latest release: 1.3.1** — download it from
 [GitHub Releases](https://github.com/dinnermc/Lumispheric/releases/latest) or [Modrinth](https://modrinth.com/mod/lumispheric).
 
 ## Features
